@@ -3,14 +3,15 @@
 [![CI](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-9%20passing-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-18%20passing-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
 corruption** in LLM inference engines such as vLLM, SGLang and LMCache.
 It does this **exactly** (hash equality, not floating-point comparison),
 **on a laptop CPU** (no GPU, no model weights), and **reproducibly** (one
-seed replays the entire run, event for event).
+seed replays the entire run, event for event, and failures shrink automatically
+to a handful of events).
 
 > Phantom is a model with no weights. To the serving engine it looks like a
 > real LLM: it is scheduled, batched, preempted, prefix-cached, and its KV
@@ -90,6 +91,7 @@ flowchart TD
     O -->|"yes"| TOK["next token<br/>H(fold of read hashes)"]
     O -->|"no"| V["Violation<br/>cross-request-leak · stale-read<br/>unwritten-read · block-leak · liveness"]
     V --> TR["Trace + fingerprint<br/>phantomkv replay --seed N"]
+    TR --> SH["Shrinker (ddmin)<br/>~50 events → ~6<br/>phantomkv shrink --seed N"]
 ```
 
 **Request flow:** the simulator submits a request → the scheduler admits it
@@ -134,8 +136,9 @@ also changes the visible output, as it would with a real model.
 | **Recompute preemption** | Under memory pressure the newest running request is evicted and later recomputed | `phantomkv/engine.py` |
 | **PD disaggregation** | Decode allocates blocks; remote prefill streams one-sided writes per block with random delay. Writes don't check ownership, just like RDMA | `phantomkv/engine.py`, `phantomkv/sim.py` |
 | **Abort handling** | Aborts at any state; blocks with in-flight writes are freed only after the last write lands | `phantomkv/engine.py` |
-| **Deterministic simulator** | One seed → arrivals, prompts, shared prefixes, aborts, network delays; virtual clock; trace fingerprint | `phantomkv/sim.py` |
+| **Deterministic simulator** | Seed → explicit event list (arrivals, prompts, shared prefixes, aborts); network delay is a hash of (seed, request, block), so it is stable when events are removed; virtual clock; trace fingerprint | `phantomkv/sim.py` |
 | **Liveness + leak checks** | Requests that never finish; blocks still referenced after quiescence | `phantomkv/sim.py`, `phantomkv/engine.py` |
+| **Test-case shrinking** | Delta debugging (ddmin) reduces a failing event list to a 1-minimal reproduction with the same violation kind | `phantomkv/shrink.py` |
 | **Planted bugs** | Switch on known bug classes to prove the oracle catches them before targeting real engines | `--plant` flag |
 
 ---
@@ -178,13 +181,14 @@ local/PD traffic, shared prefixes and 25% client aborts:
 | Engine configuration | Failing seeds | Violations reported |
 |---|---|---|
 | Correct engine | **0 / 1,000** | none (no false positives) |
-| Planted `abort-free-race`: free blocks on abort while KV writes are in flight | **544 / 1,000** | `cross-request-leak` |
+| Planted `abort-free-race`: free blocks on abort while KV writes are in flight | **545 / 1,000** | `cross-request-leak` |
 | Planted `stale-prefix-cache`: evict a cached block but keep its hash entry | **1,000 / 1,000** | `cross-request-leak`, `stale-self-read` |
 
 | Metric | Value |
 |---|---|
 | Throughput | **~100 seeds/s** (≈ 4,000 simulated requests/s) on one CPU core |
 | Determinism | same seed → identical trace fingerprint (tested) |
+| Shrinking | ~50 events → **median 6, max 13** (92 failing seeds), ~0.2 s per shrink |
 | GPU required | none |
 
 ---
@@ -193,25 +197,39 @@ local/PD traffic, shared prefixes and 25% client aborts:
 
 ```
 $ python -m phantomkv fuzz --seeds 1000 --plant abort-free-race
-phantomkv: 1000 seeds in 10.8s (93 seeds/s), plant=abort-free-race
-544 failing seeds; violation kinds: {'cross-request-leak': 1107}
+phantomkv: 1000 seeds in 10.6s (94 seeds/s), plant=abort-free-race
+545 failing seeds; violation kinds: {'cross-request-leak': 1151}
 first failure: seed 0
-  [t=8] cross-request-leak: req 8 pos 4: read KV of req 9 pos 0 (prefix differs)
-replay with:  python -m phantomkv replay --seed 0 --plant abort-free-race
+  [t=10] cross-request-leak: req 12 pos 0: read KV of req 9 pos 4 (prefix differs)
 ```
 
-```
-$ python -m phantomkv replay --seed 0 --plant abort-free-race
-...
-t=7     abort req 9 (was waiting_kv, inflight=1)     # client disconnects mid-transfer
-...                                                  # buggy engine frees req 9's blocks
-t=8     kv-land req 9 blk#0->4 left=0                # req 9's late write lands in block 4
-t=8     VIOLATION [t=8] cross-request-leak: req 8 pos 4: read KV of req 9 pos 0 (prefix differs)
+53 events are too many for a bug report, so we shrink them:
 
-seed=0 fingerprint=7994438c2a79c6d6 ticks=76 finished=33 aborted=7 violations=2
+```
+$ python -m phantomkv shrink --seed 0 --plant abort-free-race
+shrunk seed 0: 53 events -> 6 (29 runs, 0.06s)
+
+minimal reproduction:
+  t=0    submit req 18 prompt_len=15 max_new=1 local
+  t=8    submit req 19 prompt_len=22 max_new=2 local
+  t=39   submit req 21 prompt_len=23 max_new=2 remote-prefill
+  t=40   submit req 17 prompt_len=16 max_new=7 remote-prefill
+  t=45   submit req 20 prompt_len=27 max_new=10 local
+  t=48   abort  req 21
+
+trace (excerpt):
+  t=48    abort req 21 (was waiting_kv, inflight=2)    # client cancels mid-transfer
+  t=48    kv-land req 17 blk#2->18 left=1              # buggy engine already freed req 21's
+  t=49    kv-land req 17 blk#0->16 left=0              # blocks; req 17 now owns block 10
+  t=51    kv-land req 21 blk#0->10 left=0              # req 21's late write lands in block 10
+  t=51    VIOLATION cross-request-leak: req 17 pos 16: read KV of req 21 pos 0
+
+=> [t=51] cross-request-leak: req 17 pos 16: read KV of req 21 pos 0 (prefix differs)
 ```
 
-Same seed, same fingerprint, on any machine.
+Every one of the 6 events is necessary: removing any single one makes the
+failure disappear (checked in `tests/test_shrink.py`). Same seed, same
+output, on any machine.
 
 ---
 
@@ -242,6 +260,9 @@ python -m phantomkv fuzz --seeds 1000 --plant abort-free-race
 # Replay one failing seed and print the story leading to the violation
 python -m phantomkv replay --seed 0 --plant abort-free-race
 
+# Shrink it to a minimal reproduction for a bug report
+python -m phantomkv shrink --seed 0 --plant abort-free-race
+
 # Heavier fault mix
 python -m phantomkv fuzz --seeds 500 --remote-frac 0.9 --abort-frac 0.5
 ```
@@ -252,6 +273,7 @@ python -m phantomkv fuzz --seeds 500 --remote-frac 0.9 --abort-frac 0.5
 |---|---|
 | `fuzz` | `--seeds N` · `--start S` · `--plant {abort-free-race, stale-prefix-cache}` · `--remote-frac F` · `--abort-frac F` · `--stop-first` |
 | `replay` | `--seed N` · `--plant …` · `--context K` (trace lines before the violation) · `--full` |
+| `shrink` | `--seed N` · `--plant …` |
 
 ---
 
@@ -269,6 +291,11 @@ pytest -q
 | `test_planted_bug_is_caught[*]` | every planted bug class is detected |
 | `test_abort_race_is_reported_as_cross_request_leak` | the race is classified correctly |
 | `test_same_seed_same_run` / `test_different_seeds_differ` | determinism |
+| `test_event_list_reproduces_seed_exactly` | seed → event list → identical run |
+| `test_network_delay_independent_of_other_events` | removing events doesn't perturb other requests' timing |
+| `test_shrunk_repro_is_small_and_still_fails[*]` | ≤ 15 events, same violation kind |
+| `test_shrunk_repro_is_one_minimal[*]` | removing any single event makes the failure disappear |
+| `test_ddmin_*` | the minimiser itself |
 
 CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on every push.
 
@@ -279,8 +306,8 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 | Phase | Status |
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
-| 1. Test-case shrinking: failing seed → minimal event trace | 🔄 next |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ⏳ |
+| 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 next |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
@@ -296,11 +323,13 @@ phantom-kv/
 ├── phantomkv/
 │   ├── provenance.py      # Tag, chain hashes, phantom attention + LM head
 │   ├── engine.py          # ToyEngine: paged KV, prefix cache, preemption, PD, aborts, oracle
-│   ├── sim.py             # Deterministic simulator, workload generator, Result/fingerprint
+│   ├── sim.py             # Event list, workload generator, deterministic simulator
+│   ├── shrink.py          # ddmin delta debugging → minimal reproductions
 │   ├── cli.py             # fuzz / replay commands
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
-│   └── test_oracle.py     # no false positives · planted bugs caught · determinism
+│   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
+│   └── test_shrink.py     # minimal, still-failing, 1-minimal reproductions
 ├── docs/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
 │   ├── ROADMAP.md         # phases and exit criteria
@@ -318,6 +347,7 @@ phantom-kv/
 - Zhou, J., et al. (2021). FoundationDB: A Distributed Unbundled Transactional Key Value Store. SIGMOD 2021. Simulation testing: https://apple.github.io/foundationdb/testing.html
 - TigerBeetle VOPR simulator. https://github.com/tigerbeetle/tigerbeetle
 - Kingsbury, K. Jepsen: distributed systems safety research. https://jepsen.io
+- Zeller, A., & Hildebrandt, R. (2002). Simplifying and Isolating Failure-Inducing Input. IEEE Transactions on Software Engineering 28(2).
 - Meng, R., et al. (2023). Greybox Fuzzing of Distributed Systems (Mallory). ACM CCS 2023. https://arxiv.org/abs/2305.02601
 - GRIEF: Continuous Discovery of Vulnerabilities in LLM Serving Systems with Fuzzing (2026). https://arxiv.org/abs/2605.11202
 - Gu, Y., et al. (2026). Ekka: Automated Diagnosis of Silent Errors in LLM Inference. ICML 2026.
