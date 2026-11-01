@@ -1,4 +1,4 @@
-"""Command line:  python -m phantomkv fuzz | replay"""
+"""Command line:  python -m phantomkv fuzz | replay | shrink"""
 
 from __future__ import annotations
 
@@ -49,6 +49,26 @@ def _replay(a: argparse.Namespace) -> int:
     return 0 if res.ok else 1
 
 
+def _shrink(a: argparse.Namespace) -> int:
+    from .shrink import shrink_seed
+
+    t0 = time.perf_counter()
+    res = shrink_seed(a.seed, Config(), a.plant)
+    if res is None:
+        print(f"seed {a.seed} passes; nothing to shrink")
+        return 0
+    dt = time.perf_counter() - t0
+    print(f"shrunk seed {a.seed}: {len(res.original)} events -> {len(res.minimal)} "
+          f"({res.runs} runs, {dt:.2f}s)\n")
+    print("minimal reproduction:")
+    for ev in sorted(res.minimal, key=lambda e: (e.time, e.rid)):
+        print(f"  {ev}")
+    print("\ntrace:")
+    print("\n".join(f"  {line}" for line in res.result.trace))
+    print(f"\n=> {res.violation}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="phantomkv",
                                 description="Deterministic simulation testing for LLM serving KV caches")
@@ -69,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--context", type=int, default=25, help="trace lines before the violation")
     r.add_argument("--full", action="store_true")
     r.set_defaults(fn=_replay)
+
+    s = sub.add_parser("shrink", help="minimise a failing seed to a small reproduction")
+    s.add_argument("--seed", type=int, required=True)
+    s.add_argument("--plant", choices=PLANTS, default=None)
+    s.set_defaults(fn=_shrink)
 
     a = p.parse_args(argv)
     return a.fn(a)
