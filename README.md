@@ -327,8 +327,7 @@ phantom-kv/
 
 ## Author
 
-**Sameer Ahmed** · B.E. CSE, Osmania University ·
-[GitHub](https://github.com/sameer-sde)
+**Sameer Ahmed** · [GitHub](https://github.com/sameer-sde)
 
 Related work: [vLLM PR #54832](https://github.com/vllm-project/vllm/pull/54832) ·
 [RaftKV](https://github.com/sameer-sde/raftKv) ·
