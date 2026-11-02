@@ -15,8 +15,12 @@ on:
   workflow_dispatch:
 
 env:
-  # Same vLLM commit the project is developed against (docs/VLLM_INTEGRATION.md).
-  VLLM_COMMIT: 0e5b2ba118cfb3763a3640942e02dd8d93e8ed6c
+  # Development pin is 0e5b2ba118 (docs/VLLM_INTEGRATION.md), which has no
+  # published CPU wheel. CI uses its parent, 76c6f3f2a (0.33.0rc1.dev484): the
+  # only difference is vllm/model_executor/models/mimo_v2_omni.py (+ its test
+  # and CI config), none of which Phantom touches. Pinned to the exact file,
+  # because the "nightly" index moves.
+  VLLM_WHEEL: https://wheels.vllm.ai/76c6f3f2a95f6049657db1e513133b824a5c8175/vllm-0.33.0rc1.dev484%2Bg76c6f3f2a.cpu-cp38-abi3-manylinux_2_39_x86_64.whl
   PHANTOM_CI_SEEDS: "10"
 
 jobs:
@@ -30,13 +34,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install vLLM (CPU wheel for the pinned commit)
+      - name: Install vLLM (pinned CPU wheel)
         run: |
           uv venv --python 3.12 .venv
           source .venv/bin/activate
-          uv pip install vllm \
-            --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}/cpu" \
-            --index-strategy first-index --torch-backend cpu
+          uv pip install "vllm @ ${VLLM_WHEEL}" --torch-backend cpu
           uv pip install -e .
           python -c "import vllm; print('vLLM', vllm.__version__)"
 

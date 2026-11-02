@@ -5,6 +5,11 @@
 built from source with `VLLM_TARGET_DEVICE=cpu` on Apple Silicon (macOS 26,
 Apple Clang 17, Python 3.12). All file:line references below are at this commit.
 
+**CI pin:** GitHub Actions (`.github/workflows/vllm.yml`) runs against the
+published Linux CPU wheel of the parent commit, `76c6f3f2a` (`0.33.0rc1.dev484`),
+because `0e5b2ba118` has no wheel. The two differ only in
+`vllm/model_executor/models/mimo_v2_omni.py` (plus its test and CI config).
+
 **Goal of Phase 2:** run vLLM's *real* scheduler, KV-cache manager, block pool,
 prefix cache and model runner unmodified, with the Phantom model plugged in as an
 out-of-tree model, so that any KV-cache bookkeeping bug in vLLM shows up as an
