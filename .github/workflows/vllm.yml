@@ -1,0 +1,55 @@
+name: real-vllm
+
+# Runs Phantom inside real vLLM (CPU build, pinned commit) on GitHub's Linux
+# runners: unmodified vLLM must be clean and deterministic, and a planted
+# block-pool bug must be caught.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "phantomkv/**"
+      - "scripts/**"
+      - ".github/workflows/vllm.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+env:
+  # Same vLLM commit the project is developed against (docs/VLLM_INTEGRATION.md).
+  VLLM_COMMIT: 0e5b2ba118cfb3763a3640942e02dd8d93e8ed6c
+  PHANTOM_CI_SEEDS: "10"
+
+jobs:
+  phantom-in-vllm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install vLLM (CPU wheel for the pinned commit)
+        run: |
+          uv venv --python 3.12 .venv
+          source .venv/bin/activate
+          uv pip install vllm \
+            --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}/cpu" \
+            --index-strategy first-index --torch-backend cpu
+          uv pip install -e .
+          python -c "import vllm; print('vLLM', vllm.__version__)"
+
+      - name: Preload tcmalloc and Intel OpenMP (required by vLLM CPU wheels)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+          TC=$(find /usr/lib -name 'libtcmalloc_minimal.so.4' | head -1)
+          IOMP=$(find .venv -name 'libiomp5.so' | head -1)
+          echo "tcmalloc: $TC"; echo "iomp5: $IOMP"
+          echo "LD_PRELOAD=${TC}${IOMP:+:$IOMP}" >> "$GITHUB_ENV"
+
+      - name: Phantom acceptance checks against real vLLM
+        run: |
+          source .venv/bin/activate
+          bash scripts/ci_vllm.sh
