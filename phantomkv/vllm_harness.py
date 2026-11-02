@@ -25,16 +25,22 @@ from dataclasses import dataclass, field
 from .sim import Event
 from .tags import expected_continuation
 
-BLOCK_SIZE = 32
-PAGE_BYTES = 2 * BLOCK_SIZE * 1 * 32 * 4  # K+V x tokens x heads x dims x float32
+BLOCK_SIZE = 32  # default; profiles may change it
+
+
+def page_bytes(block_size: int) -> int:
+    return 2 * block_size * 1 * 32 * 4  # K+V x tokens x heads x dims x float32
 
 
 @dataclass
 class VllmConfig:
     num_requests: int = 24
     kv_blocks: int = 48
+    block_size: int = BLOCK_SIZE
     max_num_seqs: int = 4
     max_model_len: int = 512
+    max_num_batched_tokens: int | None = None  # small -> long prefills are chunked
+    async_scheduling: bool = False
     shared_prefixes: int = 3
     max_body: int = 160
     max_new: int = 24
@@ -47,6 +53,29 @@ class VllmConfig:
     revisit_gap: int = 30  # wave 2 starts this many steps after wave 1 ends
     revisit_window: int = 40
     max_steps: int = 3_000
+
+
+# Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
+PROFILES: dict[str, dict] = {
+    # Day 7/8 configuration: 48 x 32-token blocks, 4 concurrent sequences.
+    "baseline": {},
+    # Prefills split across steps: blocks are cached and hit while partially
+    # computed requests are still mid-prompt.
+    "chunked-prefill": {"max_num_batched_tokens": 64},
+    # More concurrent sequences than the cache can hold: recompute preemption.
+    "preemption": {"kv_blocks": 24, "max_num_seqs": 8},
+    # Scheduler plans step N+1 while step N runs: frees/allocations interleave
+    # with in-flight work.
+    "async": {"async_scheduling": True},
+    # Bigger blocks, same bytes: different block boundaries and eviction units.
+    "block64": {"block_size": 64, "kv_blocks": 24},
+}
+
+
+def profile_config(name: str) -> "VllmConfig":
+    if name not in PROFILES:
+        raise ValueError(f"unknown profile {name!r}; choose from {sorted(PROFILES)}")
+    return VllmConfig(**PROFILES[name])
 
 
 def vllm_workload(seed: int, cfg: VllmConfig) -> list[Event]:
@@ -70,15 +99,16 @@ def vllm_workload(seed: int, cfg: VllmConfig) -> list[Event]:
         if rng.random() < cfg.abort_frac:
             events.append(Event(t + rng.randrange(1, 30), "abort", rid))
 
-    wave1 = [e for e in events if e.kind == "submit" and len(e.prompt) > BLOCK_SIZE]
+    B = cfg.block_size
+    wave1 = [e for e in events if e.kind == "submit" and len(e.prompt) > B]
     start = cfg.arrival_window + cfg.revisit_gap
     for i in range(cfg.revisit_requests if wave1 else 0):
         rid = cfg.num_requests + i
         src = rng.choice(wave1)
-        k = rng.randrange(1, len(src.prompt) // BLOCK_SIZE + 1)  # whole blocks
+        k = rng.randrange(1, len(src.prompt) // B + 1)  # whole blocks
         body = [rng.randrange(1, 50_000) for _ in range(rng.randrange(1, 40))]
         max_new = 1 + rng.randrange(cfg.max_new)
-        prompt = (list(src.prompt[: k * BLOCK_SIZE]) + body)[: cfg.max_model_len - max_new - 1]
+        prompt = (list(src.prompt[: k * B]) + body)[: cfg.max_model_len - max_new - 1]
         events.append(Event(start + rng.randrange(cfg.revisit_window), "submit", rid,
                             tuple(prompt), max_new))
     return events
@@ -94,6 +124,7 @@ class VllmResult:
     violations: list[dict]
     liveness: bool
     outputs: dict[int, list[int]] = field(repr=False, default_factory=dict)
+    metrics: dict[str, float] = field(default_factory=dict)  # vLLM counters, this run
 
     @property
     def ok(self) -> bool:
@@ -141,16 +172,38 @@ class VllmRunner:
             skip_tokenizer_init=True,
             dtype="float32",
             enforce_eager=True,
-            async_scheduling=False,
+            async_scheduling=self.cfg.async_scheduling,
             enable_prefix_caching=True,
-            block_size=BLOCK_SIZE,
+            block_size=self.cfg.block_size,
             max_model_len=self.cfg.max_model_len,
             max_num_seqs=self.cfg.max_num_seqs,
-            kv_cache_memory_bytes=self.cfg.kv_blocks * PAGE_BYTES,
+            kv_cache_memory_bytes=self.cfg.kv_blocks * page_bytes(self.cfg.block_size),
             seed=0,
+            disable_log_stats=False,  # so get_metrics() can prove the chaos happened
+            **self._extra_engine_args(),
         )
         self.engine = self.llm.llm_engine
         self.vocab = self.engine.model_config.hf_config.vocab_size
+
+    def _extra_engine_args(self) -> dict:
+        if self.cfg.max_num_batched_tokens is None:
+            return {}
+        return {"enable_chunked_prefill": True,
+                "max_num_batched_tokens": self.cfg.max_num_batched_tokens}
+
+    COUNTERS = ("vllm:num_preemptions", "vllm:prefix_cache_hits", "vllm:prefix_cache_queries")
+
+    def counters(self) -> dict[str, float]:
+        """Current values of the vLLM counters we report (summed over labels)."""
+        out = {k: 0.0 for k in self.COUNTERS}
+        try:
+            for m in self.engine.get_metrics():
+                for k in self.COUNTERS:
+                    if m.name == k or m.name == k + "_total":
+                        out[k] += float(getattr(m, "value", 0) or 0)
+        except Exception:  # metrics are diagnostics; never fail a run on them
+            pass
+        return out
 
     def _report_offset(self) -> int:
         return os.path.getsize(self.report) if os.path.exists(self.report) else 0
@@ -169,6 +222,7 @@ class VllmRunner:
         events = vllm_workload(seed, self.cfg) if events is None else events
         self.engine.reset_prefix_cache()
         offset = self._report_offset()
+        before = self.counters()
         by_step: dict[int, list[Event]] = {}
         for ev in events:
             by_step.setdefault(ev.time, []).append(ev)
@@ -213,8 +267,11 @@ class VllmRunner:
             if got != want:
                 mismatches.append(f"req {rid}: first diff at output token "
                                   f"{next(i for i, (g, w) in enumerate(zip(got, want)) if g != w)}")
+        after = self.counters()
+        metrics = {k.split(":")[1]: after[k] - before[k] for k in self.COUNTERS}
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
-                          self._violations_since(offset), liveness=bool(live), outputs=outputs)
+                          self._violations_since(offset), liveness=bool(live), outputs=outputs,
+                          metrics=metrics)
 
 
 # ------------------------------------------------------------------ shrinking
