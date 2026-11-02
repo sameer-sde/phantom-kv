@@ -64,9 +64,9 @@ PROFILES: dict[str, dict] = {
     "chunked-prefill": {"max_num_batched_tokens": 64},
     # More concurrent sequences than the cache can hold: recompute preemption.
     "preemption": {"kv_blocks": 24, "max_num_seqs": 8},
-    # Scheduler plans step N+1 while step N runs: frees/allocations interleave
-    # with in-flight work.
-    "async": {"async_scheduling": True},
+    # NOTE: no "async" profile. vLLM's CPU platform forces
+    # scheduler_config.async_scheduling = False (vllm/platforms/cpu.py), so it
+    # would silently be baseline again; async scheduling needs a GPU run.
     # Bigger blocks, same bytes: different block boundaries and eviction units.
     "block64": {"block_size": 64, "kv_blocks": 24},
 }
@@ -157,8 +157,15 @@ class VllmRunner:
         if os.path.exists(self.report):
             os.remove(self.report)
         os.environ["PHANTOM_REPORT"] = self.report
+        # Run vLLM's EngineCore in THIS process. With the default multiprocess
+        # engine, the core runs its own busy loop: add/abort messages arrive
+        # asynchronously, so "abort at step k" can land a step late (observed:
+        # a fresh engine produced one extra token for an aborted request on its
+        # first run only). In-process, add_request / abort_request / step()
+        # execute in strict order, which deterministic replay requires.
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         if plant:
-            os.environ["PHANTOM_VLLM_PLANT"] = plant  # inherited by EngineCore
+            os.environ["PHANTOM_VLLM_PLANT"] = plant  # read by the plugin at engine start
         else:
             os.environ.pop("PHANTOM_VLLM_PLANT", None)
         self.plant = plant
@@ -234,6 +241,8 @@ class VllmRunner:
         finished: set[int] = set()
         aborted: set[int] = set()
         step = 0
+        # In-process engine: step() runs exactly one scheduler + model step, so
+        # step() only while requests are live (it would otherwise spin idle).
         while step <= last_event_step or live:
             for ev in by_step.get(step, ()):
                 if ev.kind == "submit":

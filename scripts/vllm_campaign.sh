@@ -2,14 +2,14 @@
 # Phase 3 campaign: every vLLM profile, unmodified and with a planted bug.
 #     bash scripts/vllm_campaign.sh            # 20 seeds per run
 #     SEEDS=50 bash scripts/vllm_campaign.sh
-# Each run starts its own vLLM engine (~80 s on a laptop), so 5 profiles x 2
-# takes ~15-20 minutes. Prints one summary line per run; full logs go to
+# Each run starts its own vLLM engine (~80 s on a laptop), so 4 profiles x 2
+# takes ~12-15 minutes. Prints one summary line per run; full logs go to
 # campaign_logs/.
 set -uo pipefail
 
 SEEDS="${SEEDS:-20}"
 PLANT="stale-prefix-cache"
-PROFILES="${PROFILES:-baseline chunked-prefill preemption async block64}"
+PROFILES="${PROFILES:-baseline chunked-prefill preemption block64}"
 mkdir -p campaign_logs
 
 printf "%-16s %-20s %-10s %s\n" PROFILE VLLM RESULT DETAILS
