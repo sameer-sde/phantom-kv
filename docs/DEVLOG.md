@@ -327,3 +327,59 @@ nightly index), and the pin is documented in `docs/VLLM_INTEGRATION.md`.
 
 **Phase 2 complete.** Next: Phase 3, more chaos (chunked prefill, async
 scheduling, tight batch budgets, block sizes) on real vLLM.
+
+## Day 10 — 2026-11-03
+
+**Built (Phase 3 starts)**
+- vLLM configuration profiles, each stressing a different part of KV
+  bookkeeping: `baseline`, `chunked-prefill` (`max_num_batched_tokens=64`),
+  `preemption` (24 blocks, 8 concurrent sequences), `block64`.
+- Runs report vLLM's own counters (`num_preemptions`, `prefix_cache_hits`,
+  `prefix_cache_queries`), so a clean result comes with proof that the
+  stressed path was exercised.
+- `vllm-fuzz --profile`, `vllm-shrink --profile`, and
+  `scripts/vllm_campaign.sh` (every profile, unmodified + planted).
+
+**Campaign (20 seeds per run, 680 requests each)**
+
+| Profile | Unmodified vLLM | `stale-prefix-cache` planted | Engine counters (unmodified) |
+|---|---|---|---|
+| baseline | PASS | CAUGHT 15/20 | 0 preemptions, 33% prefix-cache hit rate |
+| chunked-prefill | PASS | CAUGHT 15/20 | 0 preemptions, 33% hit rate |
+| preemption | PASS | CAUGHT 20/20 | **16 preemptions**, 25% hit rate |
+| block64 | PASS | CAUGHT 16/20 | 0 preemptions, 29% hit rate |
+
+Unmodified runs use `--check-determinism` (each seed run twice).
+Throughput ~100 req/s with every seed run twice, ~210-240 req/s single.
+
+**Investigation 1: a profile that silently did nothing**
+The first campaign had an `async` profile. Its counters matched baseline
+*exactly* (22,688 hit tokens, 680 requests). Cause: `vllm/platforms/cpu.py`
+forces `scheduler_config.async_scheduling = False` ("async scheduling is not
+required on CPU"). The profile was removed; async scheduling needs a GPU run.
+
+**Investigation 2: chunked-prefill ALARM = a timing race in the harness**
+Unmodified vLLM, seed 0 "NONDETERMINISTIC" with no violations. Hypothesis 1
+(free-block order after cache reset changes eviction) was *disproved*:
+running seed 0 four times on one engine gave identical steps (132) and hits
+(1088). The only difference: the first run on a fresh engine produced 355
+output tokens, later runs 354, all correct. Cause: the default multiprocess
+engine runs its own busy loop, so `abort_request` arrives asynchronously and
+can land a step late; the slow first run let an aborted request emit one
+more token. Fix: run the EngineCore in-process
+(`VLLM_ENABLE_V1_MULTIPROCESSING=0`). After the fix: four runs identical
+(`fp=7beb8cc701bb54da`), and the campaign is all PASS / CAUGHT.
+
+**Learned**
+- Measure that a configuration actually took effect; frameworks override
+  settings silently.
+- Test your hypothesis before fixing: the first explanation was wrong, and
+  the data said so.
+- A deterministic simulator needs synchronous control of the system under
+  test; message-passing between processes reintroduces timing.
+- Gap: no counter directly proves chunking; next, report scheduled tokens
+  per step to show prefills were split.
+
+**Next (Day 11)**
+- Prove chunking happened; add a second planted bug class so detection isn't
+  tested against a single bug.

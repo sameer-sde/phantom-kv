@@ -323,6 +323,29 @@ Prefix A is cached, evicted under pressure, and requested again; the stale
 index entry hands the new request recycled memory. Every one of the 13 events
 is necessary.
 
+
+### Phase 3: stressing different parts of vLLM
+
+Each profile runs vLLM with a different configuration; every run reports
+vLLM's own counters as proof that the stressed path was really exercised.
+
+| Profile | Unmodified vLLM (20 seeds × 2 runs) | `stale-prefix-cache` planted | Engine counters |
+|---|---|---|---|
+| baseline | ✅ PASS | ❌ caught 15/20 | 33% prefix-cache hit rate |
+| chunked-prefill (≤64 tokens/step) | ✅ PASS | ❌ caught 15/20 | 33% hit rate |
+| preemption (24 blocks, 8 seqs) | ✅ PASS | ❌ caught **20/20** | **16 preemptions** |
+| block64 (64-token blocks) | ✅ PASS | ❌ caught 16/20 | 29% hit rate |
+
+```
+bash scripts/vllm_campaign.sh
+```
+
+Two things the counters and determinism checks exposed along the way: vLLM's
+CPU platform silently disables async scheduling (so that profile was dropped),
+and the multiprocess engine let aborts arrive a step late. The harness now
+runs the engine in-process so every add, abort and step is exact. Details in
+the [devlog](docs/DEVLOG.md#day-10--2026-11-03).
+
 ---
 
 ## Quick start
@@ -366,8 +389,8 @@ python -m phantomkv fuzz --seeds 500 --remote-frac 0.9 --abort-frac 0.5
 | `fuzz` | `--seeds N` · `--start S` · `--plant {abort-free-race, stale-prefix-cache}` · `--remote-frac F` · `--abort-frac F` · `--stop-first` |
 | `replay` | `--seed N` · `--plant …` · `--context K` (trace lines before the violation) · `--full` |
 | `shrink` | `--seed N` · `--plant …` |
-| `vllm-fuzz` | `--seeds N` · `--start S` · `--plant NAME` · `--check-determinism` · `-v` (needs the vLLM environment) |
-| `vllm-shrink` | `--seed N` · `--plant NAME` (needs the vLLM environment) |
+| `vllm-fuzz` | `--seeds N` · `--start S` · `--profile NAME` · `--plant NAME` · `--check-determinism` · `-v` (needs the vLLM environment) |
+| `vllm-shrink` | `--seed N` · `--profile NAME` · `--plant NAME` (needs the vLLM environment) |
 
 ---
 
@@ -408,7 +431,7 @@ CI runs on every push:
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
-| 3. More chaos on real vLLM: chunked prefill, async scheduling, tight batch budgets, block sizes | 🔄 next |
+| 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | 🔄 in progress: 4 profiles, all clean on unmodified vLLM, planted bug caught in each |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
@@ -444,6 +467,7 @@ phantom-kv/
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
 │   ├── ci_vllm.sh         # real-vLLM acceptance checks (CI + local)
+│   ├── vllm_campaign.sh   # every profile, unmodified + planted
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   └── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 ├── .github/workflows/
