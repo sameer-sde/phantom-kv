@@ -289,12 +289,38 @@ the reference.
 | Run | Result |
 |---|---|
 | unmodified vLLM, 20 seeds, each run twice (`--check-determinism`) | ✅ 0 violations; every seed identical across both runs |
-| `--plant stale-prefix-cache`, 20 seeds | ❌ caught on seed 12 (11 `misplaced-block`, 2 wrong outputs) |
+| `--plant stale-prefix-cache`, 20 seeds | ❌ **caught on 15 of 20 seeds** |
 
-~190 requests/s on one CPU core. Along the way Phantom raised one false alarm
+Each seed sends 24 requests, then a second wave of 10 that come back for the
+first blocks of earlier prompts after the cache has churned, which is exactly when
+a stale cache entry does damage. ~190 requests/s on one CPU core. Along the way Phantom raised one false alarm
 on unmodified vLLM; it was traced to Phantom (vLLM caches blocks at schedule
 time, so the model must write the whole batch before checking, like real
 attention) and fixed. See the [devlog](docs/DEVLOG.md#day-7--2026-11-02).
+
+### Shrinking a real-vLLM failure
+
+`phantomkv vllm-shrink` runs delta debugging against the real engine,
+re-running vLLM for every candidate event list:
+
+```
+$ python -m phantomkv vllm-shrink --seed 1 --plant stale-prefix-cache
+shrunk seed 1: 38 events -> 13 (235 vLLM runs, 12.5s), kind=misplaced-block
+reproduces 3/3 times on fresh re-runs
+
+minimal reproduction (same letter = same first 32-token block):
+  step 5    submit req 11  prompt_len=110  first_block=A max_new=13
+  ...       9 requests with prefixes B..H fill the 48-block cache
+  step 87   submit req 33  prompt_len=52   first_block=A max_new=6
+  step 97   submit req 31  prompt_len=113  first_block=A max_new=3
+
+violations in the minimal run:
+   {'kind': 'misplaced-block', ..., 'pos': 64, 'detail': 'slot 224 holds position 96'}
+```
+
+Prefix A is cached, evicted under pressure, and requested again; the stale
+index entry hands the new request recycled memory. Every one of the 13 events
+is necessary.
 
 ---
 
@@ -340,6 +366,7 @@ python -m phantomkv fuzz --seeds 500 --remote-frac 0.9 --abort-frac 0.5
 | `replay` | `--seed N` · `--plant …` · `--context K` (trace lines before the violation) · `--full` |
 | `shrink` | `--seed N` · `--plant …` |
 | `vllm-fuzz` | `--seeds N` · `--start S` · `--plant NAME` · `--check-determinism` · `-v` (needs the vLLM environment) |
+| `vllm-shrink` | `--seed N` · `--plant NAME` (needs the vLLM environment) |
 
 ---
 
@@ -373,7 +400,7 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅, planted vLLM bug caught under memory pressure ✅, seeded step-by-step fuzzing with aborts ✅ (deterministic) |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅, planted vLLM bug caught under memory pressure ✅, seeded step-by-step fuzzing with aborts ✅ (deterministic), shrinking on real vLLM ✅ |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |

@@ -139,7 +139,7 @@ Prompts are passed as token ids (`TokensPrompt`), so no tokenizer is needed.
 | 5 | Tag write + read via `get_attention_context` | ✅ 8 prompts × 2 rounds with prefix-cache hits: 748 tags written, 19,776 slot reads, 0 violations, all outputs match reference |
 | 6 | Harness: seeded workload → step-by-step `LLMEngine` → reference check | ✅ done on Day 7: `phantomkv vllm-fuzz`, 20 seeds × 2 runs clean and deterministic |
 | 7 | Plant a bug in vLLM (runtime plant: `_maybe_evict_cached_block` keeps a stale index entry) | ✅ done on Day 6: caught (96 `misplaced-block` violations, 7/8 wrong outputs); unmodified vLLM passes. Shrinking: Day 8 |
-| 8 | Aborts, preemption pressure, prefix sharing at scale; shrinking on real vLLM | aborts + memory pressure ✅ (Day 7); shrinking next |
+| 8 | Aborts, preemption pressure, prefix sharing at scale; shrinking on real vLLM | ✅ revisit wave: planted bug caught on 15/20 seeds; `vllm-shrink`: 38 → 13 events, reproduces 3/3 |
 
 ## 5. Risks and open questions
 

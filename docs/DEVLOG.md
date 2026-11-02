@@ -252,3 +252,43 @@ Throughput: ~190 requests/s on one CPU core (480 requests in 2.5 s).
 **Next (Day 8)**
 - Shrink real-vLLM failures (seed 12) with ddmin, reusing one engine.
 - Raise detection rate: workloads that re-request evicted prefixes.
+
+## Day 8 — 2026-11-02
+
+**Built**
+- Revisit wave in `vllm_workload()`: 10 extra requests that reuse the first
+  whole blocks of a random earlier prompt, arriving after the cache has
+  churned. (Seeds now produce different workloads than on Day 7.)
+- `shrink()` for real vLLM + `phantomkv vllm-shrink --seed N [--plant NAME]`:
+  ddmin over the event list, re-running real vLLM for every candidate with
+  one reused engine and the prefix cache reset each time; the minimal list is
+  re-run 3 times to confirm it reproduces.
+
+**Results**
+
+| Run | Result |
+|---|---|
+| unmodified vLLM, 20 seeds x 2 runs (680 requests) | 0 violations, identical across runs |
+| `--plant stale-prefix-cache`, 20 seeds | **15 / 20 caught** (Day 7: 1 / 20) |
+| `vllm-shrink --seed 1 --plant stale-prefix-cache` | **38 events -> 13**, 235 vLLM runs in 12.5 s, reproduces **3/3** |
+
+Minimal reproduction for seed 1 (same letter = same first 32-token block):
+```
+step 5    submit req 11  first_block=A      <- prefix A cached
+step 15-79  9 requests B..H                 <- fill the 48 blocks; A's blocks evicted and reused
+step 87   submit req 33  first_block=A      <- prefix A requested again
+step 97   submit req 31  first_block=A      <- stale index entry hit
+=> misplaced-block: slot 224 holds position 96
+```
+
+**Learned**
+- Workload design matters as much as the oracle: the same planted bug went
+  from 1/20 to 15/20 detection just by re-requesting evicted prefixes.
+- Real-engine reproductions are larger than toy ones (13 vs ~6 events):
+  eviction needs enough *other* traffic to fill the cache, and ddmin proves
+  each of those requests is necessary.
+- The engine is reused across ~235 runs, so violation `step` numbers are
+  cumulative; next: report steps relative to the run.
+
+**Next**
+- Day 9: run the real-vLLM check in GitHub CI (Linux CPU wheels, pinned commit).
