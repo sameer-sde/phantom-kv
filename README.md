@@ -3,7 +3,7 @@
 [![CI](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-18%20passing-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-24%20passing-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
@@ -233,6 +233,29 @@ output, on any machine.
 
 ---
 
+## Running inside real vLLM
+
+Phantom now runs **inside vLLM's real engine** (v0.33 dev, CPU build on Apple
+Silicon) as an out-of-tree model plugin. vLLM's own scheduler, KV-cache
+manager, prefix cache and block tables decide where every token's KV goes;
+Phantom writes a tag there and re-reads the whole context through vLLM's
+block table at every step.
+
+```
+$ python scripts/vllm_phantom_check.py
+STATS: {'steps': 34, 'tokens_written': 748, 'slots_checked': 19776, 'violations': 0}
+OUTPUT MISMATCHES: 0
+VIOLATIONS: 0
+RESULT: PASS
+```
+
+8 prompts with long shared prefixes, generated twice: vLLM served 608 of
+1,356 positions from its prefix cache, and every one of 19,776 slot reads was
+correct. No GPU, no model weights. How it plugs in:
+[docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md).
+
+---
+
 ## Quick start
 
 ### Requirements
@@ -307,7 +330,7 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅ |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅ |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
@@ -326,12 +349,14 @@ phantom-kv/
 │   ├── sim.py             # Event list, workload generator, deterministic simulator
 │   ├── shrink.py          # ddmin delta debugging → minimal reproductions
 │   ├── cli.py             # fuzz / replay / shrink commands
-│   ├── vllm_model.py      # PhantomForCausalLM: weightless model for real vLLM
+│   ├── tags.py            # float32-exact tag encoding + reference outputs
+│   ├── vllm_model.py      # PhantomForCausalLM: writes/verifies tags in vLLM's KV cache
 │   ├── vllm_plugin.py     # registers it with vLLM (vllm.general_plugins)
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
-│   └── test_shrink.py     # minimal, still-failing, 1-minimal reproductions
+│   ├── test_shrink.py     # minimal, still-failing, 1-minimal reproductions
+│   └── test_tags.py       # tags round-trip exactly through float32
 ├── docs/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
@@ -339,7 +364,8 @@ phantom-kv/
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
-│   └── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
+│   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
+│   └── vllm_phantom_check.py  # end-to-end tag check against real vLLM
 ├── .github/workflows/ci.yml
 └── pyproject.toml
 ```

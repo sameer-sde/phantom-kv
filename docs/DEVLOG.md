@@ -124,3 +124,40 @@ The real scheduler, KV-cache manager and CPU model runner drove our model for
 **Next (Day 5)**
 - Write provenance tags into the real KV tensor via `get_attention_context()`
   and read them back through vLLM's block table.
+
+## Day 5 — 2026-11-02
+
+**Built**
+- `phantomkv/tags.py`: tag layout `[MAGIC, pos, token, h0..h3, 0]`, every field
+  an integer < 2^24, so it is exact in a float32 KV slot; `expected_continuation()`
+  is the pure-Python reference. 6 new tests (24 total).
+- `PhantomForCausalLM` now writes a tag for every new token into the slot from
+  vLLM's `slot_mapping`, cross-checks it against the block table, re-reads the
+  whole context through vLLM's block table, and emits the next token from the
+  hash chain (`hidden_states[:, 0]` -> one-hot logits).
+- `scripts/vllm_phantom_check.py`: 8 prompts with long shared prefixes,
+  generated twice so round 2 hits the prefix cache.
+
+**Result: first exact check of real vLLM KV bookkeeping, on a laptop CPU**
+```
+STATS: {'steps': 34, 'tokens_written': 748, 'slots_checked': 19776, 'violations': 0}
+OUTPUT MISMATCHES: 0
+VIOLATIONS: 0
+RESULT: PASS
+```
+Without any cache reuse the workload would write 1,356 tags; it wrote 748.
+So vLLM served 608 positions from cached blocks, and every one of the 19,776
+slot reads (including through those shared blocks) was correct.
+
+**Learned**
+- vLLM computes logits only for the last token of each request
+  (`logits_indices = query_start_loc[1:] - 1`), so a model can carry its
+  answer in `hidden_states` and make sampling exact.
+- In eager mode, warm-up/profiling runs pass no attention metadata, so the
+  model can tell real steps from warm-up and never raises false alarms.
+- A violation file (JSON lines) is the simplest way to get results out of a
+  model that may run in another process.
+
+**Next (Day 6)**
+- Plant a bug inside vLLM (local patch) and show Phantom catches it.
+- Seeded workloads + memory pressure (tiny KV cache) to force eviction and preemption.
