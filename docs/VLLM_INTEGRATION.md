@@ -138,7 +138,7 @@ Prompts are passed as token ids (`TokensPrompt`), so no tokenizer is needed.
 | 4 | `phantomkv/vllm_model.py`: register, allocate KV, no-op forward | ✅ `ARCH: ['PhantomForCausalLM']`, 4 tokens generated (`scripts/vllm_phantom_hello.py`) |
 | 5 | Tag write + read via `get_attention_context` | ✅ 8 prompts × 2 rounds with prefix-cache hits: 748 tags written, 19,776 slot reads, 0 violations, all outputs match reference |
 | 6 | Harness: seeded workload → `LLM.generate` → reference check | 100 clean seeds on real vLLM, zero violations |
-| 7 | Plant a bug in vLLM (local patch: skip `_maybe_evict_cached_block`) | Phantom catches it; shrinker minimises it |
+| 7 | Plant a bug in vLLM (runtime plant: `_maybe_evict_cached_block` keeps a stale index entry) | ✅ done on Day 6: caught (96 `misplaced-block` violations, 7/8 wrong outputs); unmodified vLLM passes. Shrinking: Day 8 |
 | 8 | Aborts, preemption pressure, prefix sharing at scale | real-engine fuzz campaign running |
 
 ## 5. Risks and open questions

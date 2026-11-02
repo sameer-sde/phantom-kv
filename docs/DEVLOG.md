@@ -161,3 +161,43 @@ slot reads (including through those shared blocks) was correct.
 **Next (Day 6)**
 - Plant a bug inside vLLM (local patch) and show Phantom catches it.
 - Seeded workloads + memory pressure (tiny KV cache) to force eviction and preemption.
+
+## Day 6 — 2026-11-02
+
+**Built**
+- `phantomkv/vllm_plants.py`: known bug classes planted into real vLLM at
+  runtime via `PHANTOM_VLLM_PLANT` (the plugin runs in every vLLM process, so
+  the plant lands in the EngineCore). vLLM's source is never modified.
+  First plant, `stale-prefix-cache`: `BlockPool._maybe_evict_cached_block`
+  forgets to drop the hash -> block index entry when a cached block is evicted.
+- `scripts/vllm_phantom_check.py --pressure`: 48 KV blocks, max 4 sequences,
+  and a churn phase (14 unrelated prompts) between two shared-prefix phases,
+  so cached blocks are evicted and reused.
+
+**Result: Phantom catches a bug planted inside real vLLM**
+
+| Run | vLLM | Slots checked | Violations | Wrong outputs | Result |
+|---|---|---|---|---|---|
+| `--pressure` | unmodified | 55,872 | 0 | 0 | PASS |
+| `--pressure --plant stale-prefix-cache` | planted bug | 47,488 | **96** (`misplaced-block`) | **7 / 8** in phase C | **FAIL (caught)** |
+| default (Day 5) | unmodified | 19,776 | 0 | 0 | PASS |
+
+First violation: `pos 0: slot 32 holds position 64`. A request asked for its
+prompt's first block; the stale index entry pointed it at block 1, which had
+been evicted and reused for another request's positions 64-95.
+Side effect visible in the stats: 224 fewer tags written (3,333 -> 3,109),
+i.e. 7 blocks x 32 tokens wrongly "reused" instead of recomputed.
+
+**Learned**
+- vLLM's cache lookup (`BlockPool.get_cached_block`) trusts the index
+  completely: nothing re-validates that a cached block still holds the
+  prefix its hash says. Correctness rests on eviction always removing index
+  entries; Phantom checks that from the outside.
+- Phantom reports the same stale block again on every later step that reads
+  it (96 reports for 7 bad blocks). Next: dedupe per (request, block) so
+  reports stay readable.
+
+**Next (Day 7)**
+- Drive vLLM step by step from a seeded event list (`LLMEngine.add_request`,
+  `abort_request`, `step`), so aborts happen at chosen moments and one seed
+  fully describes a real-vLLM run.

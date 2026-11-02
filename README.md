@@ -254,6 +254,30 @@ RESULT: PASS
 correct. No GPU, no model weights. How it plugs in:
 [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md).
 
+### Catching a bug planted inside real vLLM
+
+To prove Phantom catches real failures in the real engine, we plant a known
+bug class at runtime (vLLM's source is untouched): `stale-prefix-cache` makes
+`BlockPool._maybe_evict_cached_block` forget to remove the hash → block index
+entry when it evicts a cached block. Under memory pressure (48 KV blocks plus
+a churn phase that forces eviction and reuse):
+
+| vLLM | Slots checked | Violations | Wrong outputs | Result |
+|---|---|---|---|---|
+| unmodified | 55,872 | 0 | 0 | ✅ PASS |
+| `stale-prefix-cache` planted | 47,488 | **96** `misplaced-block` | **7 of 8** | ❌ caught |
+
+```
+$ python scripts/vllm_phantom_check.py --pressure --plant stale-prefix-cache
+VIOLATIONS: 96 {'misplaced-block': 96}
+   {'kind': 'misplaced-block', 'step': 99, 'batch_row': 0, 'pos': 0, 'detail': 'slot 32 holds position 64'}
+RESULT: FAIL
+```
+
+A request asked for its first prompt block; the stale index pointed it at a
+block that had been recycled for another request's positions 64–95. Phantom
+names the exact slot.
+
 ---
 
 ## Quick start
@@ -330,7 +354,7 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅ |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅, planted vLLM bug caught under memory pressure ✅ |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
@@ -352,6 +376,7 @@ phantom-kv/
 │   ├── tags.py            # float32-exact tag encoding + reference outputs
 │   ├── vllm_model.py      # PhantomForCausalLM: writes/verifies tags in vLLM's KV cache
 │   ├── vllm_plugin.py     # registers it with vLLM (vllm.general_plugins)
+│   ├── vllm_plants.py     # known bug classes planted into vLLM at runtime
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
@@ -365,7 +390,7 @@ phantom-kv/
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
-│   └── vllm_phantom_check.py  # end-to-end tag check against real vLLM
+│   └── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 ├── .github/workflows/ci.yml
 └── pyproject.toml
 ```
