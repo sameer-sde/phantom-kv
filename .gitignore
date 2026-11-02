@@ -7,3 +7,4 @@ build/
 dist/
 phantom_report.jsonl
 phantom_report.jsonl.stats.json
+campaign_logs/

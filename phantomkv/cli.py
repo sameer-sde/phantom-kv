@@ -70,15 +70,19 @@ def _shrink(a: argparse.Namespace) -> int:
 
 
 def _vllm_fuzz(a: argparse.Namespace) -> int:
-    from .vllm_harness import VllmRunner  # needs the vLLM environment
+    from .vllm_harness import VllmRunner, profile_config  # needs the vLLM environment
 
     t0 = time.perf_counter()
-    runner = VllmRunner(plant=a.plant)
-    print(f"engine ready in {time.perf_counter() - t0:.1f}s  plant={a.plant or 'none'}")
+    runner = VllmRunner(profile_config(a.profile), plant=a.plant)
+    print(f"engine ready in {time.perf_counter() - t0:.1f}s  "
+          f"profile={a.profile} plant={a.plant or 'none'}")
     t1, failing, kinds, reqs = time.perf_counter(), [], {}, 0
+    totals: dict[str, float] = {}
     for seed in range(a.start, a.start + a.seeds):
         res = runner.run(seed)
         reqs += res.finished + res.aborted
+        for k, val in res.metrics.items():
+            totals[k] = totals.get(k, 0) + val
         if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
             print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
             failing.append(res)
@@ -92,6 +96,11 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
     dt = time.perf_counter() - t1
     print(f"phantomkv vllm: {a.seeds} seeds, {reqs} requests in {dt:.1f}s "
           f"({reqs / dt:.1f} req/s)")
+    if totals:
+        hits, queries = totals.get("prefix_cache_hits", 0), totals.get("prefix_cache_queries", 0)
+        rate = f" ({100 * hits / queries:.0f}% of queried tokens)" if queries else ""
+        print(f"engine counters: preemptions={int(totals.get('num_preemptions', 0))} "
+              f"prefix_cache_hit_tokens={int(hits)}{rate}")
     if not failing:
         print("no violations found")
         return 0
@@ -106,10 +115,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
 
 
 def _vllm_shrink(a: argparse.Namespace) -> int:
-    from .vllm_harness import VllmRunner, shrink  # needs the vLLM environment
+    from .vllm_harness import VllmRunner, profile_config, shrink  # needs the vLLM env
 
     t0 = time.perf_counter()
-    runner = VllmRunner(plant=a.plant)
+    runner = VllmRunner(profile_config(a.profile), plant=a.plant)
     print(f"engine ready in {time.perf_counter() - t0:.1f}s  plant={a.plant or 'none'}")
     t1 = time.perf_counter()
     res = shrink(runner, a.seed)
@@ -165,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--seeds", type=int, default=20)
     v.add_argument("--start", type=int, default=0)
     v.add_argument("--plant", default=None, help="plant a known bug into vLLM")
+    v.add_argument("--profile", default="baseline",
+                   help="vLLM configuration: baseline, chunked-prefill, preemption, async, block64")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")
@@ -173,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
     vs = sub.add_parser("vllm-shrink", help="minimise a failing real-vLLM seed")
     vs.add_argument("--seed", type=int, required=True)
     vs.add_argument("--plant", default=None, help="plant a known bug into vLLM")
+    vs.add_argument("--profile", default="baseline")
     vs.set_defaults(fn=_vllm_shrink)
 
     a = p.parse_args(argv)
