@@ -40,11 +40,22 @@ class VllmConfig:
     max_new: int = 24
     abort_frac: float = 0.25
     arrival_window: int = 40  # engine steps
+    # Second wave: requests that come back for the first whole blocks of an
+    # earlier prompt after the cache has churned. Stale-cache bugs only bite
+    # when an evicted prefix is requested again, which random traffic rarely does.
+    revisit_requests: int = 10
+    revisit_gap: int = 30  # wave 2 starts this many steps after wave 1 ends
+    revisit_window: int = 40
     max_steps: int = 3_000
 
 
 def vllm_workload(seed: int, cfg: VllmConfig) -> list[Event]:
-    """Seed -> events sized for 32-token blocks (prefixes span whole blocks)."""
+    """Seed -> events sized for 32-token blocks (prefixes span whole blocks).
+
+    Wave 1: `num_requests` arrivals with shared prefixes and client aborts.
+    Wave 2: `revisit_requests` that reuse the first whole blocks of a random
+    wave-1 prompt, after the cache has churned.
+    """
     rng = random.Random(seed)
     prefixes = [[rng.randrange(1, 50_000) for _ in range(rng.choice((32, 64, 96)))]
                 for _ in range(cfg.shared_prefixes)]
@@ -58,6 +69,18 @@ def vllm_workload(seed: int, cfg: VllmConfig) -> list[Event]:
         events.append(Event(t, "submit", rid, tuple(prompt), max_new))
         if rng.random() < cfg.abort_frac:
             events.append(Event(t + rng.randrange(1, 30), "abort", rid))
+
+    wave1 = [e for e in events if e.kind == "submit" and len(e.prompt) > BLOCK_SIZE]
+    start = cfg.arrival_window + cfg.revisit_gap
+    for i in range(cfg.revisit_requests if wave1 else 0):
+        rid = cfg.num_requests + i
+        src = rng.choice(wave1)
+        k = rng.randrange(1, len(src.prompt) // BLOCK_SIZE + 1)  # whole blocks
+        body = [rng.randrange(1, 50_000) for _ in range(rng.randrange(1, 40))]
+        max_new = 1 + rng.randrange(cfg.max_new)
+        prompt = (list(src.prompt[: k * BLOCK_SIZE]) + body)[: cfg.max_model_len - max_new - 1]
+        events.append(Event(start + rng.randrange(cfg.revisit_window), "submit", rid,
+                            tuple(prompt), max_new))
     return events
 
 
@@ -192,3 +215,4 @@ class VllmRunner:
                                   f"{next(i for i, (g, w) in enumerate(zip(got, want)) if g != w)}")
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset), liveness=bool(live), outputs=outputs)
+
