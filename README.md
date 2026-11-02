@@ -1,6 +1,7 @@
 # Phantom — Deterministic Simulation Testing for LLM-Serving KV Caches
 
 [![CI](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml)
+[![real-vllm](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
 [![Tests](https://img.shields.io/badge/tests-24%20passing-success)](#testing)
@@ -390,7 +391,13 @@ pytest -q
 | `test_shrunk_repro_is_one_minimal[*]` | removing any single event makes the failure disappear |
 | `test_ddmin_*` | the minimiser itself |
 
-CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on every push.
+CI runs on every push:
+
+* **`ci`**: the test suite on Python 3.10 and 3.12, plus a 1,000-seed clean fuzz of the simulator.
+* **`real-vllm`**: installs vLLM's Linux CPU wheel (pinned) and runs
+  [`scripts/ci_vllm.sh`](scripts/ci_vllm.sh). Unmodified vLLM must pass every check
+  (no false positives), and with a bug planted in vLLM's block pool the checks
+  must fail (no false negatives).
 
 ---
 
@@ -400,8 +407,8 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅, tags verified in vLLM's real KV cache ✅, planted vLLM bug caught under memory pressure ✅, seeded step-by-step fuzzing with aborts ✅ (deterministic), shrinking on real vLLM ✅ |
-| 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
+| 3. More chaos on real vLLM: chunked prefill, async scheduling, tight batch budgets, block sizes | 🔄 next |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
@@ -436,9 +443,12 @@ phantom-kv/
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
+│   ├── ci_vllm.sh         # real-vLLM acceptance checks (CI + local)
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   └── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
-├── .github/workflows/ci.yml
+├── .github/workflows/
+│   ├── ci.yml             # unit tests + simulator fuzz
+│   └── vllm.yml           # Phantom inside real vLLM (pinned CPU wheel)
 └── pyproject.toml
 ```
 

@@ -292,3 +292,38 @@ step 97   submit req 31  first_block=A      <- stale index entry hit
 
 **Next**
 - Day 9: run the real-vLLM check in GitHub CI (Linux CPU wheels, pinned commit).
+
+## Day 9 — 2026-11-03
+
+**Built**
+- `scripts/ci_vllm.sh`: five acceptance checks against real vLLM, in both
+  directions. Unmodified vLLM must pass (prefix-cache check, memory-pressure
+  check, 10 seeds each run twice); with `stale-prefix-cache` planted, the
+  pressure check and the seeded fuzz must *fail*. A tool that stops catching
+  the planted bug fails CI just like one that raises false alarms.
+- `.github/workflows/vllm.yml` (`real-vllm`): on every push that touches code,
+  installs vLLM's Linux CPU wheel on `ubuntu-latest`, preloads tcmalloc and
+  Intel OpenMP (required by the CPU wheels), and runs `ci_vllm.sh`.
+
+**Results**
+- Locally (Apple Silicon): 5/5 checks OK, twice.
+- GitHub Actions: green on the first push (`8c2f3b5`).
+
+**Debugged: no wheel for the pinned commit**
+`wheels.vllm.ai/0e5b2ba118.../cpu/` returned 404. The nightly index pointed at
+its parent, `76c6f3f2a` (`0.33.0rc1.dev484`), which has a
+`manylinux_2_39_x86_64` CPU wheel. `git diff 76c6f3f2a 0e5b2ba118` touches only
+`vllm/model_executor/models/mimo_v2_omni.py`, its test and CI config, none of
+which Phantom uses. So CI installs that exact wheel file (not the moving
+nightly index), and the pin is documented in `docs/VLLM_INTEGRATION.md`.
+
+**Learned**
+- Pin CI to an exact artifact, not to "nightly": otherwise results change
+  without any change in your code.
+- When the exact version isn't available, check the diff of the nearest one
+  before substituting it, and write down why it is equivalent.
+- Run `git am` once per patch: a second run leaves git mid-apply
+  (`git am --abort` restores the clean state).
+
+**Phase 2 complete.** Next: Phase 3, more chaos (chunked prefill, async
+scheduling, tight batch budgets, block sizes) on real vLLM.
