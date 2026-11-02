@@ -17,6 +17,11 @@ dev = ["pytest>=8"]
 [project.scripts]
 phantomkv = "phantomkv.cli:main"
 
+# vLLM discovers this in every process it starts and calls register(),
+# which adds the PhantomForCausalLM architecture to vLLM's model registry.
+[project.entry-points."vllm.general_plugins"]
+phantom = "phantomkv.vllm_plugin:register"
+
 [tool.setuptools]
 packages = ["phantomkv"]
 
