@@ -3,11 +3,12 @@
 Imported only by vLLM (via the plugin in `vllm_plugin.py`), never by the rest
 of phantomkv, so the core package stays dependency-free.
 
-Every forward step, for each scheduled request:
-  1. WRITE: for each new token at position p, compute
+Every forward step:
+  1. WRITE (all requests first, ascending position): for each new token at
+     position p, compute
      chain[p] = H(chain[p-1], token) -- chain[p-1] is READ BACK from the KV
      slot holding position p-1 -- and write the tag into slot_mapping[t].
-  2. CHECK: walk the request's block table over its whole context and verify
+  2. CHECK (only after every write): walk each request's block table over its whole context and verify
      every slot: tag present, right position, hash chain unbroken. Also check
      that the slot vLLM told us to write equals the slot its block table implies.
   3. EMIT: hidden_states[t, 0] = next token for that position; compute_logits
@@ -114,44 +115,52 @@ class PhantomForCausalLM(nn.Module):
             kv_cache[slot // B, 0, slot % B, :tags.TAG_WIDTH] = torch.tensor(
                 vals, dtype=kv_cache.dtype)
 
+        rows = [bt[r].tolist() for r in range(len(seq_lens))]
+
+        def slot_of(r: int, p: int) -> int:
+            return rows[r][p // B] * B + p % B
+
+        # 1) WRITE every new token in the batch before ANY read, like a real
+        #    attention layer (all KV writes for the batch, then attention).
+        #    vLLM caches blocks at schedule time, so request Y may hit blocks
+        #    that request X fills in this very step; Y's row can come first in
+        #    the batch. Writing in ascending position order guarantees the slot
+        #    for p-1 is final before the token at p reads it, across requests.
+        new_tokens = []  # (pos, batch_row, flat_index)
         for r in range(len(seq_lens)):
-            lo, hi = qsl[r], qsl[r + 1]
-            row = bt[r].tolist()
+            for t in range(qsl[r], qsl[r + 1]):
+                new_tokens.append((pos[t], r, t))
+        for p, r, t in sorted(new_tokens):
+            tok, s = ids[t], slots[t]
+            if s != slot_of(r, p):
+                self._violate("slot-mismatch", r, p,
+                              f"slot_mapping={s} but block table implies {slot_of(r, p)}")
+            prev = ROOT
+            if p > 0:
+                tag = read(slot_of(r, p - 1))
+                prev = tag[2] if tag else ROOT
+            chain = chain_step(prev, tok)
+            write(s, tags.encode(p, tok, chain))
+            hidden[t, 0] = float(tags.next_token(chain, self.vocab_size))
+            self.stats["tokens_written"] += 1
 
-            def slot_of(p: int) -> int:
-                return row[p // B] * B + p % B
-
-            # 1) write tags for this request's new tokens, in order
-            for t in range(lo, hi):
-                p, tok, s = pos[t], ids[t], slots[t]
-                if s != slot_of(p):
-                    self._violate("slot-mismatch", r, p,
-                                  f"slot_mapping={s} but block table implies {slot_of(p)}")
-                prev = ROOT
-                if p > 0:
-                    tag = read(slot_of(p - 1))
-                    prev = tag[2] if tag else ROOT
-                chain = chain_step(prev, tok)
-                write(s, tags.encode(p, tok, chain))
-                hidden[t, 0] = float(tags.next_token(chain, self.vocab_size))
-                self.stats["tokens_written"] += 1
-
-            # 2) check the whole context through the block table
+        # 2) CHECK each request's whole context through the block table
+        for r in range(len(seq_lens)):
             prev = ROOT
             for q in range(int(seq_lens[r])):
-                tag = read(slot_of(q))
+                tag = read(slot_of(r, q))
                 self.stats["slots_checked"] += 1
                 if tag is None:
-                    self._violate("unwritten-read", r, q, f"slot {slot_of(q)} holds no tag")
+                    self._violate("unwritten-read", r, q, f"slot {slot_of(r, q)} holds no tag")
                     break
                 tpos, ttok, tchain = tag
                 if tpos != q:
                     self._violate("misplaced-block", r, q,
-                                  f"slot {slot_of(q)} holds position {tpos}")
+                                  f"slot {slot_of(r, q)} holds position {tpos}")
                     break
                 if tchain != chain_step(prev, ttok):
                     self._violate("chain-break", r, q,
-                                  f"slot {slot_of(q)} does not extend the prefix before it")
+                                  f"slot {slot_of(r, q)} does not extend the prefix before it")
                     break
                 prev = tchain
         self._flush_stats()
