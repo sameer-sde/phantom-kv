@@ -137,16 +137,19 @@ Prompts are passed as token ids (`TokensPrompt`), so no tokenizer is needed.
 | 3 | vLLM CPU build on Mac; this design | ✅ smoke test generates text (`scripts/vllm_smoke.py`) |
 | 4 | `phantomkv/vllm_model.py`: register, allocate KV, no-op forward | ✅ `ARCH: ['PhantomForCausalLM']`, 4 tokens generated (`scripts/vllm_phantom_hello.py`) |
 | 5 | Tag write + read via `get_attention_context` | ✅ 8 prompts × 2 rounds with prefix-cache hits: 748 tags written, 19,776 slot reads, 0 violations, all outputs match reference |
-| 6 | Harness: seeded workload → `LLM.generate` → reference check | 100 clean seeds on real vLLM, zero violations |
+| 6 | Harness: seeded workload → step-by-step `LLMEngine` → reference check | ✅ done on Day 7: `phantomkv vllm-fuzz`, 20 seeds × 2 runs clean and deterministic |
 | 7 | Plant a bug in vLLM (runtime plant: `_maybe_evict_cached_block` keeps a stale index entry) | ✅ done on Day 6: caught (96 `misplaced-block` violations, 7/8 wrong outputs); unmodified vLLM passes. Shrinking: Day 8 |
-| 8 | Aborts, preemption pressure, prefix sharing at scale | real-engine fuzz campaign running |
+| 8 | Aborts, preemption pressure, prefix sharing at scale; shrinking on real vLLM | aborts + memory pressure ✅ (Day 7); shrinking next |
 
 ## 5. Risks and open questions
 
 * **Block size.** The CPU kernel needs a multiple of 32 (`cpu_attn.py:64`). Smaller
   blocks would give more sharing and eviction per token; 32 is the floor.
-* **Aborts mid-step** with `LLM.generate` are limited; Day 8 may need the
-  lower-level `LLMEngine` / `EngineCore` API to abort requests at chosen steps.
+* **Aborts at chosen steps**: solved on Day 7 by driving `LLMEngine` directly
+  (`add_request` / `abort_request` / `step`).
+* **Same-step prefix hits**: vLLM caches blocks at schedule time, so a request
+  can hit blocks another request fills in the same forward pass. Phantom must
+  write the whole batch before checking anything (fixed on Day 7).
 * **torch.compile / graphs** must stay off (`enforce_eager=True`): the model
   has Python-side effects.
 * **Async scheduling** may reorder when frees become visible; start with it off,

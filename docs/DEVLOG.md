@@ -201,3 +201,54 @@ i.e. 7 blocks x 32 tokens wrongly "reused" instead of recomputed.
 - Drive vLLM step by step from a seeded event list (`LLMEngine.add_request`,
   `abort_request`, `step`), so aborts happen at chosen moments and one seed
   fully describes a real-vLLM run.
+
+## Day 7 — 2026-11-02
+
+**Built**
+- `phantomkv/vllm_harness.py`: seed -> event list sized for 32-token blocks
+  (24 requests, shared prefixes of 1-3 whole blocks, ~25% client aborts).
+  `VllmRunner` drives vLLM's real `LLMEngine` one `step()` at a time: at
+  engine step k it adds/aborts exactly the events with time == k. Every
+  output (including partial outputs of aborted requests) is checked against
+  the reference; unfinished requests after `max_steps` = liveness failure.
+  One engine reused across seeds, prefix cache reset between seeds.
+- `phantomkv vllm-fuzz [--plant NAME] [--check-determinism]`.
+- `python -m phantomkv` now guards `__main__` (macOS `spawn` re-imports it).
+
+**Found and fixed a false positive in Phantom itself**
+First run: seed 14 reported violations on *unmodified* vLLM, identically
+with and without the plant, and two runs of the same seed differed.
+Root cause: `KVCacheManager.allocate_slots()` registers a request's blocks
+in the prefix cache at *schedule* time
+(`cache_blocks(request, total_computed + num_new_tokens)`), so a request
+scheduled later in the same step can hit blocks still being filled in that
+forward pass. That is legal in vLLM because attention writes KV for the
+whole batch before any read. Phantom wrote and checked one request at a
+time; when the reader's batch row came first it read leftovers of the
+block's previous occupant. Fix: write every new token in the batch first,
+in ascending position order, then check.
+
+**Results (after the fix)**
+
+| Run | Seeds | Result |
+|---|---|---|
+| `vllm-fuzz --check-determinism` (unmodified vLLM) | 20, each run twice | **0 violations, every seed identical across runs** |
+| `vllm-fuzz --plant stale-prefix-cache` | 20 | 1 seed caught (seed 12: 11 `misplaced-block`, 2 wrong outputs) |
+| Day 6 `--pressure` re-run | — | unchanged: 0 / 55,872 clean; 96 violations with plant |
+
+Throughput: ~190 requests/s on one CPU core (480 requests in 2.5 s).
+
+**Learned**
+- A bug finder's first job is to be trusted: rule out the tool before
+  blaming the engine. The "two runs differ" signal pointed straight at
+  leftover memory being read.
+- Real vLLM on CPU replays deterministically from a seed when driven step by
+  step (async scheduling off), which is what shrinking needs.
+- With multiprocess engines, `step()` blocks when nothing is in flight, so
+  the harness only steps while requests are live.
+- Detection rate of the planted bug is low at this config (1/20 seeds):
+  the stale entry is only harmful if the evicted prefix is requested again.
+
+**Next (Day 8)**
+- Shrink real-vLLM failures (seed 12) with ddmin, reusing one engine.
+- Raise detection rate: workloads that re-request evicted prefixes.
