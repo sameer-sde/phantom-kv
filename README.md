@@ -307,7 +307,7 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅ |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅, Phantom loads and runs inside real vLLM as a plugin ✅ |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
@@ -325,7 +325,9 @@ phantom-kv/
 │   ├── engine.py          # ToyEngine: paged KV, prefix cache, preemption, PD, aborts, oracle
 │   ├── sim.py             # Event list, workload generator, deterministic simulator
 │   ├── shrink.py          # ddmin delta debugging → minimal reproductions
-│   ├── cli.py             # fuzz / replay commands
+│   ├── cli.py             # fuzz / replay / shrink commands
+│   ├── vllm_model.py      # PhantomForCausalLM: weightless model for real vLLM
+│   ├── vllm_plugin.py     # registers it with vLLM (vllm.general_plugins)
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
@@ -336,7 +338,8 @@ phantom-kv/
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
-│   └── vllm_smoke.py      # does vLLM (CPU) run on this machine?
+│   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
+│   └── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 ├── .github/workflows/ci.yml
 └── pyproject.toml
 ```

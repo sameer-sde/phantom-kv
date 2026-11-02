@@ -135,7 +135,7 @@ Prompts are passed as token ids (`TokensPrompt`), so no tokenizer is needed.
 | Day | Deliverable | Done when |
 |---|---|---|
 | 3 | vLLM CPU build on Mac; this design | ✅ smoke test generates text (`scripts/vllm_smoke.py`) |
-| 4 | `phantomkv/vllm_model.py`: register, allocate KV, no-op forward | `LLM(...)` constructs with the Phantom architecture |
+| 4 | `phantomkv/vllm_model.py`: register, allocate KV, no-op forward | ✅ `ARCH: ['PhantomForCausalLM']`, 4 tokens generated (`scripts/vllm_phantom_hello.py`) |
 | 5 | Tag write + read via `get_attention_context` | one request: tags read back equal tags written |
 | 6 | Harness: seeded workload → `LLM.generate` → reference check | 100 clean seeds on real vLLM, zero violations |
 | 7 | Plant a bug in vLLM (local patch: skip `_maybe_evict_cached_block`) | Phantom catches it; shrinker minimises it |

@@ -89,3 +89,38 @@ One entry per working day: what changed, what I learned, what's next.
 **Next (Day 4)**
 - `phantomkv/vllm_model.py`: register `PhantomForCausalLM`, allocate its KV
   cache, no-op forward; `LLM(...)` constructs with the Phantom architecture.
+
+## Day 4 — 2026-11-02
+
+**Built**
+- `phantomkv/vllm_model.py`: `PhantomForCausalLM`, a weightless model with one
+  real `Attention` layer (1 head, head size 32), so vLLM allocates and binds a
+  paged KV cache for it. Forward/logits emit a placeholder token for now.
+- `phantomkv/vllm_plugin.py` + `vllm.general_plugins` entry point: vLLM calls
+  `register()` in every process it starts (main process, EngineCore, workers).
+- `scripts/vllm_phantom_hello.py`.
+
+**Result: first run of Phantom inside real vLLM** (vLLM `0.33.0rc1.dev485`, CPU, Apple Silicon)
+```
+ARCH: ['PhantomForCausalLM']
+TOKENS: (1000, 1000, 1000, 1000)
+```
+The real scheduler, KV-cache manager and CPU model runner drove our model for
+4 decode steps. `load_format="dummy"` means no weights are downloaded;
+`skip_tokenizer_init=True` + `TokensPrompt` means no tokenizer is needed.
+
+**Learned**
+- vLLM's model contract is small: `__init__(vllm_config, prefix)`, `forward`,
+  `embed_input_ids`, `compute_logits` (`interfaces_base.py`).
+- Registering with `ModelRegistry` inside a script is not enough once the
+  engine runs in a subprocess (macOS `spawn`): the child never runs that code.
+  A `vllm.general_plugins` entry point fixes it, since vLLM loads plugins in
+  each process.
+- Editable installs only pick up new entry points when reinstalled
+  (`uv pip install -e .` after changing `pyproject.toml`).
+- Harmless warning: with `skip_tokenizer_init=True`, vLLM logs
+  "Tokenizer not available"; generation is unaffected.
+
+**Next (Day 5)**
+- Write provenance tags into the real KV tensor via `get_attention_context()`
+  and read them back through vLLM's block table.
