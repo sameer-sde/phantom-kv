@@ -53,3 +53,39 @@ One entry per working day: what changed, what I learned, what's next.
 **Next**
 - Phase 2: read vLLM v1 `KVCacheManager`, `BlockPool`, CPU attention backend
   and the simulate-forward PR (#47922); design the out-of-tree Phantom model.
+
+## Day 3 — 2026-11-02
+
+**Built**
+- vLLM `0.33.0rc1.dev485` (commit `0e5b2ba118`) built from source for CPU on
+  Apple Silicon (macOS 26, Apple Clang 17, Python 3.12, uv). Smoke test passes:
+  `opt-125m` generates " the capital of the French Republic."
+- `docs/VLLM_INTEGRATION.md`: code map from our ToyEngine to vLLM v1 with
+  file:line references, and the design of `PhantomForCausalLM`.
+- `scripts/vllm_smoke.py`.
+
+**Debugged**
+1. `RuntimeError: Engine core initialization failed`. The real error was
+   hidden higher up: macOS uses `spawn` for subprocesses, which re-imports the
+   script, so the EngineCore child re-ran top-level code. Fix: put everything
+   under `if __name__ == "__main__":`.
+2. `ValueError: Available memory ... (5.0/16.0 GiB) ... less than requested
+   memory for kv (12.98/14.72 GiB)`. Running in-process
+   (`VLLM_ENABLE_V1_MULTIPROCESSING=0`) surfaced it. On CPU,
+   `gpu_memory_utilization` reserves ~90% of *system RAM* for the KV cache.
+   Fix: `kv_cache_memory_bytes=1 << 30`.
+
+**Learned (vLLM internals)**
+- `get_attention_context(layer_name)` gives any layer the attention metadata
+  (block table, seq lens), the raw KV tensor and the slot mapping, so Phantom
+  can plug in without patching vLLM.
+- CPU KV layout: `[num_blocks, num_kv_heads, block_size, 2*head_size]`;
+  block size must be a multiple of 32; head size >= 32.
+- vLLM already has defences our toy engine only modelled: connector-driven
+  `delay_free_blocks`, `defer_block_free`/`deferred_frees`, copy-on-write
+  retained blocks, `unpin_blocks` reuse watchers. These newer paths are the
+  bug-hunting targets.
+
+**Next (Day 4)**
+- `phantomkv/vllm_model.py`: register `PhantomForCausalLM`, allocate its KV
+  cache, no-op forward; `LLM(...)` constructs with the Phantom architecture.

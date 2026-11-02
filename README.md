@@ -307,12 +307,12 @@ CI runs the test suite on Python 3.10 and 3.12 plus a 1,000-seed clean fuzz on e
 |---|---|
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
-| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 next |
+| 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | 🔄 in progress: vLLM CPU build on Apple Silicon ✅, [design](docs/VLLM_INTEGRATION.md) ✅ |
 | 3. Seeded fault injection against vLLM's real `EngineCore` | ⏳ |
 | 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
-Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
+Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
 
 ---
 
@@ -332,8 +332,11 @@ phantom-kv/
 │   └── test_shrink.py     # minimal, still-failing, 1-minimal reproductions
 ├── docs/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
+│   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
+├── scripts/
+│   └── vllm_smoke.py      # does vLLM (CPU) run on this machine?
 ├── .github/workflows/ci.yml
 └── pyproject.toml
 ```
