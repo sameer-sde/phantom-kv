@@ -216,3 +216,54 @@ class VllmRunner:
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset), liveness=bool(live), outputs=outputs)
 
+
+# ------------------------------------------------------------------ shrinking
+def primary_kind(res: VllmResult) -> str | None:
+    """The failure kind a shrink must preserve (first violation wins)."""
+    if res.violations:
+        return res.violations[0]["kind"]
+    if res.mismatches:
+        return "output-mismatch"
+    if res.liveness:
+        return "liveness"
+    return None
+
+
+@dataclass
+class VllmShrinkResult:
+    seed: int
+    kind: str
+    original: list[Event]
+    minimal: list[Event]
+    result: VllmResult
+    runs: int
+    reproduced: int  # how many of `confirm` fresh re-runs of `minimal` still failed
+    confirm: int
+
+
+def shrink(runner: VllmRunner, seed: int, confirm: int = 3) -> VllmShrinkResult | None:
+    """ddmin over the event list, re-running real vLLM for every candidate.
+
+    The engine is reused (start-up takes ~80 s; one run takes well under a
+    second); the prefix cache is reset before every run. The minimal list is
+    then re-run `confirm` times to check that it reproduces reliably.
+    """
+    from .shrink import ddmin
+
+    events = vllm_workload(seed, runner.cfg)
+    first = runner.run(seed, events)
+    kind = primary_kind(first)
+    if kind is None:
+        return None
+    runs = 1
+
+    def fails(evs: list[Event]) -> bool:
+        nonlocal runs
+        runs += 1
+        res = runner.run(seed, evs)
+        return kind in res.kinds
+
+    minimal = ddmin(events, fails)
+    finals = [runner.run(seed, minimal) for _ in range(confirm)]
+    reproduced = sum(kind in r.kinds for r in finals)
+    return VllmShrinkResult(seed, kind, events, minimal, finals[0], runs, reproduced, confirm)

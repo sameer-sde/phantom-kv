@@ -1,4 +1,4 @@
-"""Command line:  python -m phantomkv fuzz | replay | shrink | vllm-fuzz"""
+"""Command line:  python -m phantomkv fuzz | replay | shrink | vllm-fuzz | vllm-shrink"""
 
 from __future__ import annotations
 
@@ -105,6 +105,36 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
     return 1
 
 
+def _vllm_shrink(a: argparse.Namespace) -> int:
+    from .vllm_harness import VllmRunner, shrink  # needs the vLLM environment
+
+    t0 = time.perf_counter()
+    runner = VllmRunner(plant=a.plant)
+    print(f"engine ready in {time.perf_counter() - t0:.1f}s  plant={a.plant or 'none'}")
+    t1 = time.perf_counter()
+    res = shrink(runner, a.seed)
+    if res is None:
+        print(f"seed {a.seed} passes; nothing to shrink")
+        return 0
+    print(f"shrunk seed {a.seed}: {len(res.original)} events -> {len(res.minimal)} "
+          f"({res.runs} vLLM runs, {time.perf_counter() - t1:.1f}s), kind={res.kind}")
+    print(f"reproduces {res.reproduced}/{res.confirm} times on fresh re-runs\n")
+    groups: dict[tuple[int, ...], str] = {}
+    print("minimal reproduction (same letter = same first 32-token block):")
+    for ev in sorted(res.minimal, key=lambda e: (e.time, e.rid)):
+        line = f"  step {ev.time:<4} {ev.kind:<6} req {ev.rid:<3}"
+        if ev.kind == "submit":
+            g = groups.setdefault(ev.prompt[:32], "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[len(groups) % 26])
+            line += f" prompt_len={len(ev.prompt):<4} first_block={g} max_new={ev.max_new}"
+        print(line)
+    print("\nviolations in the minimal run:")
+    for v in res.result.violations[:5]:
+        print("  ", v)
+    for m in res.result.mismatches[:5]:
+        print("  ", m)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="phantomkv",
                                 description="Deterministic simulation testing for LLM serving KV caches")
@@ -139,6 +169,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")
     v.set_defaults(fn=_vllm_fuzz)
+
+    vs = sub.add_parser("vllm-shrink", help="minimise a failing real-vLLM seed")
+    vs.add_argument("--seed", type=int, required=True)
+    vs.add_argument("--plant", default=None, help="plant a known bug into vLLM")
+    vs.set_defaults(fn=_vllm_shrink)
 
     a = p.parse_args(argv)
     return a.fn(a)
