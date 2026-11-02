@@ -1,4 +1,4 @@
-"""Command line:  python -m phantomkv fuzz | replay | shrink"""
+"""Command line:  python -m phantomkv fuzz | replay | shrink | vllm-fuzz"""
 
 from __future__ import annotations
 
@@ -69,6 +69,42 @@ def _shrink(a: argparse.Namespace) -> int:
     return 1
 
 
+def _vllm_fuzz(a: argparse.Namespace) -> int:
+    from .vllm_harness import VllmRunner  # needs the vLLM environment
+
+    t0 = time.perf_counter()
+    runner = VllmRunner(plant=a.plant)
+    print(f"engine ready in {time.perf_counter() - t0:.1f}s  plant={a.plant or 'none'}")
+    t1, failing, kinds, reqs = time.perf_counter(), [], {}, 0
+    for seed in range(a.start, a.start + a.seeds):
+        res = runner.run(seed)
+        reqs += res.finished + res.aborted
+        if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
+            print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
+            failing.append(res)
+            continue
+        if not res.ok:
+            failing.append(res)
+            for k, n in res.kinds.items():
+                kinds[k] = kinds.get(k, 0) + n
+            if a.verbose:
+                print(f"seed {seed}: {res.kinds}")
+    dt = time.perf_counter() - t1
+    print(f"phantomkv vllm: {a.seeds} seeds, {reqs} requests in {dt:.1f}s "
+          f"({reqs / dt:.1f} req/s)")
+    if not failing:
+        print("no violations found")
+        return 0
+    first = failing[0]
+    print(f"{len(failing)} failing seeds; kinds: {kinds}")
+    print(f"first failure: seed {first.seed}: {first.kinds}")
+    for v in first.violations[:3]:
+        print("  ", v)
+    for m in first.mismatches[:3]:
+        print("  ", m)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="phantomkv",
                                 description="Deterministic simulation testing for LLM serving KV caches")
@@ -94,6 +130,15 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--seed", type=int, required=True)
     s.add_argument("--plant", choices=PLANTS, default=None)
     s.set_defaults(fn=_shrink)
+
+    v = sub.add_parser("vllm-fuzz", help="fuzz real vLLM step by step (needs the vLLM env)")
+    v.add_argument("--seeds", type=int, default=20)
+    v.add_argument("--start", type=int, default=0)
+    v.add_argument("--plant", default=None, help="plant a known bug into vLLM")
+    v.add_argument("--check-determinism", action="store_true",
+                   help="run every seed twice and require identical results")
+    v.add_argument("-v", "--verbose", action="store_true")
+    v.set_defaults(fn=_vllm_fuzz)
 
     a = p.parse_args(argv)
     return a.fn(a)
