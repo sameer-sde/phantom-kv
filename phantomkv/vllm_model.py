@@ -3,14 +3,25 @@
 Imported only by vLLM (via the plugin in `vllm_plugin.py`), never by the rest
 of phantomkv, so the core package stays dependency-free.
 
-Day 4 scope: vLLM must accept this class as a text-generation model, allocate
-a real paged KV cache for its single attention layer, and run forward passes.
-The forward pass does not touch the KV cache yet; provenance tags arrive on Day 5.
-See docs/VLLM_INTEGRATION.md section 3 for the full design.
+Every forward step, for each scheduled request:
+  1. WRITE: for each new token at position p, compute
+     chain[p] = H(chain[p-1], token) -- chain[p-1] is READ BACK from the KV
+     slot holding position p-1 -- and write the tag into slot_mapping[t].
+  2. CHECK: walk the request's block table over its whole context and verify
+     every slot: tag present, right position, hash chain unbroken. Also check
+     that the slot vLLM told us to write equals the slot its block table implies.
+  3. EMIT: hidden_states[t, 0] = next token for that position; compute_logits
+     turns it into a one-hot, so greedy sampling returns it exactly.
+
+Violations are appended as JSON lines to $PHANTOM_REPORT (default
+phantom_report.jsonl), because the model may run in a different process than
+the harness. See docs/VLLM_INTEGRATION.md section 3.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Iterable
 
 import torch
@@ -18,13 +29,13 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import get_attention_context
 
-# The CPU attention backend's smallest supported head size
-# (vllm/v1/attention/backends/cpu_attn.py: get_supported_head_sizes).
+from . import tags
+from .provenance import ROOT, chain_step
+
+# Smallest head size the CPU attention backend supports (cpu_attn.py).
 HEAD_SIZE = 32
-# Day 4 placeholder: every step emits this token. Day 5 replaces it with
-# a hash of the provenance chain read back from the KV cache.
-PLACEHOLDER_TOKEN = 1000
 
 
 class PhantomForCausalLM(nn.Module):
@@ -46,7 +57,10 @@ class PhantomForCausalLM(nn.Module):
             cache_config=vllm_config.cache_config,
             prefix=self.layer_name,
         )
+        self.report_path = os.environ.get("PHANTOM_REPORT", "phantom_report.jsonl")
+        self.stats = {"steps": 0, "tokens_written": 0, "slots_checked": 0, "violations": 0}
 
+    # ------------------------------------------------------------ vLLM API
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return torch.zeros(input_ids.shape[0], self.hidden_size, dtype=torch.float32,
                            device=input_ids.device)
@@ -59,14 +73,96 @@ class PhantomForCausalLM(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        n = positions.shape[0]
-        return torch.zeros(n, self.hidden_size, dtype=torch.float32, device=positions.device)
+        hidden = torch.zeros(positions.shape[0], self.hidden_size, dtype=torch.float32,
+                             device=positions.device)
+        meta, _, kv_cache, slot_mapping = get_attention_context(self.layer_name)
+        if meta is None or kv_cache.numel() == 0 or input_ids is None:
+            return hidden  # warm-up / profiling run: no real requests
+        if slot_mapping is None:
+            slot_mapping = meta.slot_mapping
+        self._step(meta, kv_cache, slot_mapping, input_ids, positions, hidden)
+        return hidden
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = torch.full((hidden_states.shape[0], self.vocab_size), -1e4,
                             dtype=torch.float32, device=hidden_states.device)
-        logits[:, PLACEHOLDER_TOKEN] = 1e4
+        tok = hidden_states[:, 0].round().long().clamp(0, self.vocab_size - 1)
+        logits[torch.arange(hidden_states.shape[0]), tok] = 1e4
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return set()  # weightless by design
+
+    # ------------------------------------------------------------- Phantom
+    def _step(self, meta, kv_cache, slot_mapping, input_ids, positions, hidden) -> None:
+        # CPU KV layout: [num_blocks, num_kv_heads, block_size, 2 * head_size]
+        assert kv_cache.dim() == 4 and kv_cache.shape[1] == 1, tuple(kv_cache.shape)
+        B = kv_cache.shape[2]
+        n_tok = int(meta.num_actual_tokens)
+        qsl = meta.query_start_loc.tolist()
+        seq_lens = meta.seq_lens.tolist()
+        bt = meta.block_table
+        ids = input_ids[:n_tok].tolist()
+        pos = positions[:n_tok].tolist()
+        slots = slot_mapping[:n_tok].tolist()
+        self.stats["steps"] += 1
+
+        def read(slot: int):
+            return tags.decode(kv_cache[slot // B, 0, slot % B, :tags.TAG_WIDTH].tolist())
+
+        def write(slot: int, vals: list[float]) -> None:
+            kv_cache[slot // B, 0, slot % B, :tags.TAG_WIDTH] = torch.tensor(
+                vals, dtype=kv_cache.dtype)
+
+        for r in range(len(seq_lens)):
+            lo, hi = qsl[r], qsl[r + 1]
+            row = bt[r].tolist()
+
+            def slot_of(p: int) -> int:
+                return row[p // B] * B + p % B
+
+            # 1) write tags for this request's new tokens, in order
+            for t in range(lo, hi):
+                p, tok, s = pos[t], ids[t], slots[t]
+                if s != slot_of(p):
+                    self._violate("slot-mismatch", r, p,
+                                  f"slot_mapping={s} but block table implies {slot_of(p)}")
+                prev = ROOT
+                if p > 0:
+                    tag = read(slot_of(p - 1))
+                    prev = tag[2] if tag else ROOT
+                chain = chain_step(prev, tok)
+                write(s, tags.encode(p, tok, chain))
+                hidden[t, 0] = float(tags.next_token(chain, self.vocab_size))
+                self.stats["tokens_written"] += 1
+
+            # 2) check the whole context through the block table
+            prev = ROOT
+            for q in range(int(seq_lens[r])):
+                tag = read(slot_of(q))
+                self.stats["slots_checked"] += 1
+                if tag is None:
+                    self._violate("unwritten-read", r, q, f"slot {slot_of(q)} holds no tag")
+                    break
+                tpos, ttok, tchain = tag
+                if tpos != q:
+                    self._violate("misplaced-block", r, q,
+                                  f"slot {slot_of(q)} holds position {tpos}")
+                    break
+                if tchain != chain_step(prev, ttok):
+                    self._violate("chain-break", r, q,
+                                  f"slot {slot_of(q)} does not extend the prefix before it")
+                    break
+                prev = tchain
+        self._flush_stats()
+
+    def _violate(self, kind: str, req_row: int, pos: int, detail: str) -> None:
+        self.stats["violations"] += 1
+        rec = {"kind": kind, "step": self.stats["steps"], "batch_row": req_row,
+               "pos": pos, "detail": detail}
+        with open(self.report_path, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def _flush_stats(self) -> None:
+        with open(self.report_path + ".stats.json", "w") as f:
+            json.dump(self.stats, f)

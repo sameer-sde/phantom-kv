@@ -8,7 +8,7 @@ Run:
 
 Expected last lines:
     ARCH: ['PhantomForCausalLM']
-    TOKENS: (1000, 1000, 1000, 1000)
+    TOKENS: (four token ids derived from the prompt's hash chain)
 """
 
 from vllm import LLM, SamplingParams
