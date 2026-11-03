@@ -82,7 +82,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         res = runner.run(seed)
         reqs += res.finished + res.aborted
         for k, val in res.metrics.items():
-            totals[k] = totals.get(k, 0) + val
+            if k == "max_step_tokens":
+                totals[k] = max(totals.get(k, 0), val)
+            else:
+                totals[k] = totals.get(k, 0) + val
         if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
             print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
             failing.append(res)
@@ -100,7 +103,9 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         hits, queries = totals.get("prefix_cache_hits", 0), totals.get("prefix_cache_queries", 0)
         rate = f" ({100 * hits / queries:.0f}% of queried tokens)" if queries else ""
         print(f"engine counters: preemptions={int(totals.get('num_preemptions', 0))} "
-              f"prefix_cache_hit_tokens={int(hits)}{rate}")
+              f"prefix_cache_hit_tokens={int(hits)}{rate} "
+              f"chunked_prefill_continuations={int(totals.get('prefill_continuations', 0))} "
+              f"max_tokens_per_step={int(totals.get('max_step_tokens', 0))}")
     if not failing:
         print("no violations found")
         return 0
@@ -111,6 +116,8 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         print("  ", v)
     for m in first.mismatches[:3]:
         print("  ", m)
+    if first.engine_error:
+        print("   engine error:", first.engine_error)
     return 1
 
 

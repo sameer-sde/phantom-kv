@@ -59,7 +59,13 @@ class PhantomForCausalLM(nn.Module):
             prefix=self.layer_name,
         )
         self.report_path = os.environ.get("PHANTOM_REPORT", "phantom_report.jsonl")
-        self.stats = {"steps": 0, "tokens_written": 0, "slots_checked": 0, "violations": 0}
+        self.stats = {"steps": 0, "tokens_written": 0, "slots_checked": 0, "violations": 0,
+                      # evidence counters (not checks): did the engine do what we think?
+                      "prefill_continuations": 0,  # multi-token step resuming a previous one
+                      "max_step_tokens": 0}
+        # (first block id, next position) of every multi-token write last step;
+        # used to recognise a prompt being prefilled in chunks across steps.
+        self._prev_chunk_ends: set[tuple[int, int]] = set()
 
     # ------------------------------------------------------------ vLLM API
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -143,6 +149,19 @@ class PhantomForCausalLM(nn.Module):
             write(s, tags.encode(p, tok, chain))
             hidden[t, 0] = float(tags.next_token(chain, self.vocab_size))
             self.stats["tokens_written"] += 1
+
+        # Evidence of chunked prefill: a request writing several tokens this step
+        # starting exactly where its previous multi-token write ended.
+        chunk_ends: set[tuple[int, int]] = set()
+        for r in range(len(seq_lens)):
+            q_len = qsl[r + 1] - qsl[r]
+            if q_len > 1 and rows[r]:
+                start = pos[qsl[r]]
+                if (rows[r][0], start) in self._prev_chunk_ends:
+                    self.stats["prefill_continuations"] += 1
+                chunk_ends.add((rows[r][0], start + q_len))
+        self._prev_chunk_ends = chunk_ends
+        self.stats["max_step_tokens"] = max(self.stats["max_step_tokens"], n_tok)
 
         # 2) CHECK each request's whole context through the block table
         for r in range(len(seq_lens)):

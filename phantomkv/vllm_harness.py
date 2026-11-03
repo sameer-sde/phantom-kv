@@ -125,10 +125,11 @@ class VllmResult:
     liveness: bool
     outputs: dict[int, list[int]] = field(repr=False, default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)  # vLLM counters, this run
+    engine_error: str | None = None  # exception raised by vLLM during the run
 
     @property
     def ok(self) -> bool:
-        return not (self.mismatches or self.violations or self.liveness)
+        return not (self.mismatches or self.violations or self.liveness or self.engine_error)
 
     @property
     def kinds(self) -> dict[str, int]:
@@ -139,6 +140,8 @@ class VllmResult:
             k["output-mismatch"] = k.get("output-mismatch", 0) + 1
         if self.liveness:
             k["liveness"] = 1
+        if self.engine_error:
+            k["engine-error"] = 1
         return k
 
     @property
@@ -212,6 +215,14 @@ class VllmRunner:
             pass
         return out
 
+    def model_stats(self) -> dict[str, float]:
+        """Cumulative counters written by the Phantom model (its stats file)."""
+        try:
+            with open(self.report + ".stats.json") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
     def _report_offset(self) -> int:
         return os.path.getsize(self.report) if os.path.exists(self.report) else 0
 
@@ -230,6 +241,7 @@ class VllmRunner:
         self.engine.reset_prefix_cache()
         offset = self._report_offset()
         before = self.counters()
+        mbefore = self.model_stats()
         by_step: dict[int, list[Event]] = {}
         for ev in events:
             by_step.setdefault(ev.time, []).append(ev)
@@ -241,31 +253,35 @@ class VllmRunner:
         finished: set[int] = set()
         aborted: set[int] = set()
         step = 0
-        # In-process engine: step() runs exactly one scheduler + model step, so
-        # step() only while requests are live (it would otherwise spin idle).
+        engine_error: str | None = None
         while step <= last_event_step or live:
-            for ev in by_step.get(step, ()):
-                if ev.kind == "submit":
-                    params = SamplingParams(max_tokens=ev.max_new, temperature=0,
-                                            detokenize=False)
-                    self.engine.add_request(str(ev.rid),
-                                            TokensPrompt(prompt_token_ids=list(ev.prompt)),
-                                            params)
-                    prompts[ev.rid] = ev.prompt
-                    live.add(ev.rid)
-                elif ev.kind == "abort" and ev.rid in live:
-                    self.engine.abort_request([str(ev.rid)])
-                    live.discard(ev.rid)
-                    aborted.add(ev.rid)
-            if live:
-                for out in self.engine.step():
-                    rid = int(str(out.request_id).split("-")[0])
-                    if rid in aborted:
-                        continue
-                    outputs[rid] = list(out.outputs[0].token_ids)
-                    if out.finished:
-                        live.discard(rid)
-                        finished.add(rid)
+            try:
+                for ev in by_step.get(step, ()):
+                    if ev.kind == "submit":
+                        params = SamplingParams(max_tokens=ev.max_new, temperature=0,
+                                                detokenize=False)
+                        self.engine.add_request(
+                            str(ev.rid), TokensPrompt(prompt_token_ids=list(ev.prompt)), params)
+                        prompts[ev.rid] = ev.prompt
+                        live.add(ev.rid)
+                    elif ev.kind == "abort" and ev.rid in live:
+                        self.engine.abort_request([str(ev.rid)])
+                        live.discard(ev.rid)
+                        aborted.add(ev.rid)
+                # In-process engine: step() runs exactly one scheduler + model
+                # step, so only step while requests are live.
+                if live:
+                    for out in self.engine.step():
+                        rid = int(str(out.request_id).split("-")[0])
+                        if rid in aborted:
+                            continue
+                        outputs[rid] = list(out.outputs[0].token_ids)
+                        if out.finished:
+                            live.discard(rid)
+                            finished.add(rid)
+            except Exception as e:  # vLLM itself failed (e.g. an internal assert)
+                engine_error = f"step {step}: {type(e).__name__}: {e}"[:300]
+                break
             step += 1
             if step > self.cfg.max_steps:
                 break
@@ -278,9 +294,14 @@ class VllmRunner:
                                   f"{next(i for i, (g, w) in enumerate(zip(got, want)) if g != w)}")
         after = self.counters()
         metrics = {k.split(":")[1]: after[k] - before[k] for k in self.COUNTERS}
+        mafter = self.model_stats()
+        metrics["prefill_continuations"] = (mafter.get("prefill_continuations", 0)
+                                            - mbefore.get("prefill_continuations", 0))
+        metrics["max_step_tokens"] = mafter.get("max_step_tokens", 0)
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
-                          self._violations_since(offset), liveness=bool(live), outputs=outputs,
-                          metrics=metrics)
+                          self._violations_since(offset),
+                          liveness=bool(live) and engine_error is None, outputs=outputs,
+                          metrics=metrics, engine_error=engine_error)
 
 
 # ------------------------------------------------------------------ shrinking
