@@ -282,7 +282,12 @@ class VllmRunner:
                             live.discard(rid)
                             finished.add(rid)
             except Exception as e:  # vLLM itself failed (e.g. an internal assert)
-                engine_error = f"step {step}: {type(e).__name__}: {e}"[:300]
+                import traceback
+
+                frame = traceback.extract_tb(e.__traceback__)[-1]
+                where = f"{frame.filename.split('site-packages/')[-1].split('vllm_source/')[-1]}"
+                engine_error = (f"step {step}: {type(e).__name__}: {e} "
+                                f"at {where}:{frame.lineno} `{(frame.line or '').strip()}`")[:400]
                 self.poisoned = f"seed {seed}, {engine_error}"
                 break
             step += 1
