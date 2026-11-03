@@ -383,3 +383,58 @@ more token. Fix: run the EngineCore in-process
 **Next (Day 11)**
 - Prove chunking happened; add a second planted bug class so detection isn't
   tested against a single bug.
+
+## Day 11 — 2026-11-03
+
+**Built**
+- Second planted bug class, `missing-touch`: `BlockPool.touch()` doesn't count
+  a new owner when a prefix-cache hit lands on a block another running request
+  still holds (refcount bug, vs. `stale-prefix-cache`'s index bug).
+- Evidence of chunked prefill (vLLM has no counter for it): the model counts
+  `prefill_continuations`, multi-token writes that resume exactly where the
+  request's previous multi-token write ended, and the largest tokens-per-step.
+- Engine exceptions are recorded with file, line and source; after one, the
+  engine is marked poisoned and remaining seeds are skipped. `vllm-fuzz` exits
+  1 only when *Phantom* found something, 2 when only vLLM's own check fired;
+  the campaign prints CAUGHT / VLLM-ASSERT / MISSED / CRASH.
+
+**Results**
+
+| Profile | Unmodified | `stale-prefix-cache` | Evidence |
+|---|---|---|---|
+| baseline | PASS | CAUGHT 15/20 | 0 chunk continuations, up to 499 tokens/step |
+| chunked-prefill | PASS | CAUGHT 15/20 | **498 chunk continuations, max 64 tokens/step** |
+| preemption | PASS | CAUGHT 20/20 | 16 preemptions |
+| block64 | PASS | CAUGHT 16/20 | 64-token blocks |
+
+`missing-touch` (re-run after the harness fixes):
+
+| Profile | What happened |
+|---|---|
+| baseline | seed 0: no visible corruption (freed cached blocks go to the *back* of the free queue, so the block wasn't reused while still read); seed 1, step 2: vLLM assertion |
+| preemption | seed 0, step 14: vLLM assertion, before any corruption was visible |
+
+The assertion is `vllm/v1/core/block_pool.py:730`, in
+`BlockPool.get_new_blocks()`: `assert block.ref_cnt == 0` for every block taken
+off the free queue. A block wrongly freed while still owned is caught when it
+is handed out again.
+
+**Finding: where Phantom adds value**
+- Bugs that make vLLM's bookkeeping *inconsistent* (refcounts) are already
+  caught by vLLM's own assertions.
+- Bugs that leave the bookkeeping *consistent but wrong* (a valid-looking index
+  entry pointing at recycled memory) trip no assertion; only an external oracle
+  like Phantom sees them (`stale-prefix-cache`: 15-20 of 20 seeds in every
+  profile). Phase 5's bug hunt should aim there.
+
+**Mistakes caught today (my own)**
+- The first campaign printed CAUGHT for `missing-touch` because any non-zero
+  exit counted as "caught", including vLLM crashing. The logs showed
+  `engine-error` on every seed after the first (a poisoned engine) and, in one
+  profile, a harness `KeyError` from a request left over from the previous seed.
+- Negative per-run counters came from a stale stats file of a previous process.
+All fixed (see commits); `missing-touch` is not in CI, since Phantom doesn't catch it.
+
+**Next (Day 12)**
+- Start Phase 4: prefill/decode disaggregation on one laptop, with injected
+  transfer faults.

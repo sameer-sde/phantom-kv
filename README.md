@@ -329,16 +329,25 @@ is necessary.
 Each profile runs vLLM with a different configuration; every run reports
 vLLM's own counters as proof that the stressed path was really exercised.
 
-| Profile | Unmodified vLLM (20 seeds × 2 runs) | `stale-prefix-cache` planted | Engine counters |
+| Profile | Unmodified vLLM (20 seeds × 2 runs) | `stale-prefix-cache` planted | Evidence the path was exercised |
 |---|---|---|---|
 | baseline | ✅ PASS | ❌ caught 15/20 | 33% prefix-cache hit rate |
-| chunked-prefill (≤64 tokens/step) | ✅ PASS | ❌ caught 15/20 | 33% hit rate |
+| chunked-prefill (≤64 tokens/step) | ✅ PASS | ❌ caught 15/20 | **498 chunked-prefill continuations**, max 64 tokens/step |
 | preemption (24 blocks, 8 seqs) | ✅ PASS | ❌ caught **20/20** | **16 preemptions** |
 | block64 (64-token blocks) | ✅ PASS | ❌ caught 16/20 | 29% hit rate |
 
 ```
 bash scripts/vllm_campaign.sh
 ```
+
+**A second bug class, and what it taught us.** `missing-touch` plants a
+refcount bug (a shared block isn't counted for its second owner). Here vLLM
+defends itself: `assert block.ref_cnt == 0` in `BlockPool.get_new_blocks()`
+(`block_pool.py:730`) fires when the wrongly freed block is handed out again,
+before any corruption is visible to Phantom. Bugs that make vLLM's bookkeeping
+*inconsistent* are caught by vLLM's own assertions; bugs that leave it
+*consistent but wrong*, like a stale index entry, trip nothing, and that is
+where Phantom is needed.
 
 Two things the counters and determinism checks exposed along the way: vLLM's
 CPU platform silently disables async scheduling (so that profile was dropped),
@@ -431,8 +440,8 @@ CI runs on every push:
 | 0. Exact oracle + deterministic simulator, validated on a toy engine | ✅ done |
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
-| 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | 🔄 in progress: 4 profiles, all clean on unmodified vLLM, planted bug caught in each |
-| 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | ⏳ |
+| 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
+| 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | 🔄 next |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
 Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
