@@ -66,7 +66,7 @@ correct handling in vLLM is checked (Phantom must stay silent).
 
 | Day | Deliverable | Done when |
 |---|---|---|
-| 12 | Phantom through `maybe_transfer_kv_layer`; `scripts/vllm_pd_check.py` | two engines, transferred KV verified, all outputs match |
+| 12 | Phantom through `maybe_transfer_kv_layer`; `scripts/vllm_pd_check.py` | ✅ 864 transferred positions (exactly the connector's expected count) verified, 12,624 slot reads, 0 violations, all outputs match |
 | 13 | `PhantomFaultConnector` with swap + drop | swap caught as a cross-request leak; drop handled |
 | 14 | delay + abort mid-transfer | SGLang Oct-2026 bug class reproduced as a plant and caught |
 | 15-16 | seeded PD fuzzing + shrinking across both engines | `phantomkv pd-fuzz` |

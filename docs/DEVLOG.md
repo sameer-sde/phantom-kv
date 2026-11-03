@@ -438,3 +438,44 @@ All fixed (see commits); `missing-touch` is not in CI, since Phantom doesn't cat
 **Next (Day 12)**
 - Start Phase 4: prefill/decode disaggregation on one laptop, with injected
   transfer faults.
+
+## Day 12 — 2026-11-03
+
+**Built (Phase 4 starts)**
+- Phantom's write-and-check step now runs through vLLM's own
+  `maybe_transfer_kv_layer` decorator. KV connectors save and wait per layer
+  from inside that decorator, which vLLM puts on its attention op; Phantom never
+  calls the op, so as a prefill engine it would have saved nothing.
+- `scripts/vllm_pd_check.py`: a prefill engine and a decode engine as two
+  separate processes, connected by vLLM's `ExampleConnector` (KV through files
+  in a shared folder). Prefix caching off in both, so any context the decode
+  engine did not compute must have arrived through the connector.
+- Evidence counter `context_not_computed_here`.
+- `docs/PD_DESIGN.md`: how the connector moves KV, what Phantom checks, the
+  fault plan for days 13-14.
+
+**Result: KV transferred between two vLLM engines, verified exactly**
+```
+PREFILL: 8 prompts, KV files saved: 8
+DECODE STATS: {'steps': 13, 'tokens_written': 232, 'slots_checked': 12624,
+               'violations': 0, 'context_not_computed_here': 864}
+DECODE OUTPUT MISMATCHES: 0
+RESULT: PASS
+```
+The connector loads `(len(prompt) - 1) // 32 * 32` tokens per prompt: for
+lengths 130, 121, 178, 151, 140, 63, 139, 78 that is 128 + 96 + 160 + 128 +
+128 + 32 + 128 + 64 = **864**, exactly the context the decode engine had
+without computing it. Every transferred slot, the seam to locally computed KV,
+and all 96 decode tokens checked out. The decode engine wrote 232 tokens:
+144 prompt tokens beyond the transferred blocks + 88 decode inputs.
+Single-engine regression unchanged (55,872 slots, PASS).
+
+**Learned**
+- In vLLM, "who calls the connector" matters: loads are triggered by the
+  model runner, saves by a decorator on the attention op. A model that skips
+  the op must call the same hook.
+- Tags carry `(pos, token, chain)`, not slot numbers, so they stay valid when
+  KV moves to different slots in another engine.
+
+**Next (Day 13)**
+- `PhantomFaultConnector`: swap and drop faults as planted bugs.

@@ -355,6 +355,28 @@ and the multiprocess engine let aborts arrive a step late. The harness now
 runs the engine in-process so every add, abort and step is exact. Details in
 the [devlog](docs/DEVLOG.md#day-10--2026-11-03).
 
+
+### Phase 4: two vLLM engines, KV transferred between them
+
+Disaggregated serving splits a request across a *prefill* engine and a
+*decode* engine; the KV cache is shipped between them. Phantom now runs on
+both sides: the prefill engine (one process) saves each prompt's KV through
+vLLM's `ExampleConnector`, and the decode engine (another process) loads it
+into its own slots and continues.
+
+```
+$ python scripts/vllm_pd_check.py
+PREFILL: 8 prompts, KV files saved: 8
+DECODE STATS: {... 'slots_checked': 12624, 'violations': 0, 'context_not_computed_here': 864}
+DECODE OUTPUT MISMATCHES: 0
+RESULT: PASS
+```
+
+864 is exactly the number of positions the connector should transfer for
+these prompts; every one, plus the seam where locally computed KV takes over,
+was verified in the decode engine. Next: inject faults into the transfer
+(swap, drop, abort mid-transfer). Design: [docs/PD_DESIGN.md](docs/PD_DESIGN.md).
+
 ---
 
 ## Quick start
@@ -441,7 +463,7 @@ CI runs on every push:
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
-| 4. Two-engine PD disaggregation with transfer faults (delay, reorder, duplicate, abort mid-transfer, handshake failure) | 🔄 next |
+| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 in progress: two engines connected, transferred KV verified exactly; fault injection next |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
 Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
@@ -471,6 +493,7 @@ phantom-kv/
 ├── docs/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
+│   ├── PD_DESIGN.md       # phase 4: disaggregated prefill/decode + fault plan
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
@@ -478,7 +501,8 @@ phantom-kv/
 │   ├── ci_vllm.sh         # real-vLLM acceptance checks (CI + local)
 │   ├── vllm_campaign.sh   # every profile, unmodified + planted
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
-│   └── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
+│   ├── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
+│   └── vllm_pd_check.py   # two engines (prefill + decode) via ExampleConnector
 ├── .github/workflows/
 │   ├── ci.yml             # unit tests + simulator fuzz
 │   └── vllm.yml           # Phantom inside real vLLM (pinned CPU wheel)
