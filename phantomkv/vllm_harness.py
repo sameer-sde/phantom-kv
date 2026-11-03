@@ -157,8 +157,10 @@ class VllmRunner:
                  report: str = "phantom_report.jsonl") -> None:
         self.cfg = cfg or VllmConfig()
         self.report = os.path.abspath(report)
-        if os.path.exists(self.report):
-            os.remove(self.report)
+        for path in (self.report, self.report + ".stats.json"):  # stale files would skew deltas
+            if os.path.exists(path):
+                os.remove(path)
+        self.poisoned: str | None = None  # set once vLLM raises: its state can't be trusted
         os.environ["PHANTOM_REPORT"] = self.report
         # Run vLLM's EngineCore in THIS process. With the default multiprocess
         # engine, the core runs its own busy loop: add/abort messages arrive
@@ -273,18 +275,28 @@ class VllmRunner:
                 if live:
                     for out in self.engine.step():
                         rid = int(str(out.request_id).split("-")[0])
-                        if rid in aborted:
-                            continue
+                        if rid in aborted or rid not in prompts:
+                            continue  # aborted, or a leftover from an earlier run
                         outputs[rid] = list(out.outputs[0].token_ids)
                         if out.finished:
                             live.discard(rid)
                             finished.add(rid)
             except Exception as e:  # vLLM itself failed (e.g. an internal assert)
                 engine_error = f"step {step}: {type(e).__name__}: {e}"[:300]
+                self.poisoned = f"seed {seed}, {engine_error}"
                 break
             step += 1
             if step > self.cfg.max_steps:
                 break
+
+        # Never leave requests behind: they would hold blocks (so the next
+        # reset_prefix_cache fails) and emit outputs into the next run.
+        leftovers = [str(r) for r in live]
+        if leftovers:
+            try:
+                self.engine.abort_request(leftovers)
+            except Exception:
+                pass
 
         mismatches = []
         for rid, got in sorted(outputs.items()):

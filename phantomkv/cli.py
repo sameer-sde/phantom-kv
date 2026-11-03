@@ -78,8 +78,14 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
           f"profile={a.profile} plant={a.plant or 'none'}")
     t1, failing, kinds, reqs = time.perf_counter(), [], {}, 0
     totals: dict[str, float] = {}
+    ran = 0
     for seed in range(a.start, a.start + a.seeds):
+        if runner.poisoned:
+            print(f"vLLM raised an exception ({runner.poisoned}); its state can no longer "
+                  f"be trusted, so seeds {seed}..{a.start + a.seeds - 1} were skipped")
+            break
         res = runner.run(seed)
+        ran += 1
         reqs += res.finished + res.aborted
         for k, val in res.metrics.items():
             if k == "max_step_tokens":
@@ -97,7 +103,7 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
             if a.verbose:
                 print(f"seed {seed}: {res.kinds}")
     dt = time.perf_counter() - t1
-    print(f"phantomkv vllm: {a.seeds} seeds, {reqs} requests in {dt:.1f}s "
+    print(f"phantomkv vllm: {ran} seeds, {reqs} requests in {dt:.1f}s "
           f"({reqs / dt:.1f} req/s)")
     if totals:
         hits, queries = totals.get("prefix_cache_hits", 0), totals.get("prefix_cache_queries", 0)
@@ -111,6 +117,7 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         return 0
     first = failing[0]
     print(f"{len(failing)} failing seeds; kinds: {kinds}")
+    phantom_found = any(r.violations or r.mismatches or r.liveness for r in failing)
     print(f"first failure: seed {first.seed}: {first.kinds}")
     for v in first.violations[:3]:
         print("  ", v)
@@ -118,6 +125,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         print("  ", m)
     if first.engine_error:
         print("   engine error:", first.engine_error)
+    # exit 1: Phantom found violations; exit 2: only vLLM's own exceptions fired
+    if not phantom_found:
+        print("verdict: no Phantom violation; vLLM raised its own exception first")
+        return 2
     return 1
 
 

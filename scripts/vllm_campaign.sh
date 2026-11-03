@@ -27,9 +27,11 @@ for profile in $PROFILES; do
     failing=$(grep -E "failing seeds" "$log" | sed 's/;.*//')
     case "$mode:$code" in
       clean:0) verdict="PASS" ;;
-      clean:*) verdict="ALARM" ;;     # violation on unmodified vLLM: investigate
-      *:1)     verdict="CAUGHT" ;;
-      *)       verdict="MISSED" ;;    # planted bug not caught (or crashed: see log)
+      clean:*) verdict="ALARM" ;;        # problem on unmodified vLLM: investigate
+      *:1)     verdict="CAUGHT" ;;       # Phantom reported a violation / wrong output
+      *:2)     verdict="VLLM-ASSERT" ;;  # vLLM's own check fired; Phantom saw nothing
+      *:0)     verdict="MISSED" ;;       # nothing detected at all
+      *)       verdict="CRASH" ;;        # harness crashed: see the log
     esac
     label=$([ "$mode" = clean ] && echo unmodified || echo "$mode")
     printf "%-16s %-20s %-10s %s | %s %s\n" "$profile" "$label" "$verdict" "$summary" "$counters" "$failing"

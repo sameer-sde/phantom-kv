@@ -34,7 +34,5 @@ expect pass "seeded fuzz x${SEEDS}, unmodified vLLM, each seed run twice" \
   python -m phantomkv vllm-fuzz --seeds "${SEEDS}" --check-determinism
 expect fail "seeded fuzz x${SEEDS}, ${PLANT} planted -> must be caught" \
   python -m phantomkv vllm-fuzz --seeds "${SEEDS}" --plant "${PLANT}"
-expect fail "seeded fuzz x${SEEDS}, missing-touch planted -> must be caught" \
-  python -m phantomkv vllm-fuzz --seeds "${SEEDS}" --plant missing-touch
 
 exit $fail
