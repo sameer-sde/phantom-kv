@@ -36,8 +36,37 @@ def _stale_prefix_cache() -> None:
     BlockPool._maybe_evict_cached_block = _maybe_evict_cached_block
 
 
+def _missing_touch() -> None:
+    """A prefix-cache hit on a block that another running request still owns
+    does not count the new owner. When the first owner finishes, the block's
+    refcount reaches 0 and it is recycled while the second request still
+    reads it.
+
+    Real code: vllm/v1/core/block_pool.py BlockPool.touch, which increments
+    block.ref_cnt for every hit.
+    """
+    from vllm.v1.core.block_pool import BlockPool
+
+    def touch(self, blocks) -> None:
+        for block in blocks:
+            if block.is_null:
+                continue
+            if block.ref_cnt == 0:
+                self.free_block_queue.remove(block)
+                block.ref_cnt += 1
+            # BUG (planted): a block already in use (ref_cnt > 0) is shared
+            # with the new request without counting it as an owner.
+            if self.metrics_collector:
+                self.metrics_collector.on_block_accessed(block)
+
+    BlockPool.touch = touch
+
+
 PLANTS: dict[str, Callable[[], None]] = {
+    # bug class 1: hash -> block index keeps an entry for an evicted block
     "stale-prefix-cache": _stale_prefix_cache,
+    # bug class 2: reference counting misses a sharer
+    "missing-touch": _missing_touch,
 }
 
 
