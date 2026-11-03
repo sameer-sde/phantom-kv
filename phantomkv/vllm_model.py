@@ -31,6 +31,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
+from vllm.model_executor.layers.attention.kv_transfer_utils import maybe_transfer_kv_layer
 
 from . import tags
 from .provenance import ROOT, chain_step
@@ -62,7 +63,11 @@ class PhantomForCausalLM(nn.Module):
         self.stats = {"steps": 0, "tokens_written": 0, "slots_checked": 0, "violations": 0,
                       # evidence counters (not checks): did the engine do what we think?
                       "prefill_continuations": 0,  # multi-token step resuming a previous one
-                      "max_step_tokens": 0}
+                      "max_step_tokens": 0,
+                      # positions already in a request's context on its first step here;
+                      # with prefix caching off they can only have arrived via a KV connector
+                      "context_not_computed_here": 0}
+        self._seen_requests: set[int] = set()  # first block ids of requests seen
         # (first block id, next position) of every multi-token write last step;
         # used to recognise a prompt being prefilled in chunks across steps.
         self._prev_chunk_ends: set[tuple[int, int]] = set()
@@ -82,13 +87,20 @@ class PhantomForCausalLM(nn.Module):
     ) -> torch.Tensor:
         hidden = torch.zeros(positions.shape[0], self.hidden_size, dtype=torch.float32,
                              device=positions.device)
+        if input_ids is None:
+            return hidden
+        self._io = (input_ids, positions, hidden)
+        _phantom_attention(self, self.layer_name)
+        return hidden
+
+    def _attend(self) -> None:
+        input_ids, positions, hidden = self._io
         meta, _, kv_cache, slot_mapping = get_attention_context(self.layer_name)
-        if meta is None or kv_cache.numel() == 0 or input_ids is None:
-            return hidden  # warm-up / profiling run: no real requests
+        if meta is None or kv_cache.numel() == 0:
+            return  # warm-up / profiling run: no real requests
         if slot_mapping is None:
             slot_mapping = meta.slot_mapping
         self._step(meta, kv_cache, slot_mapping, input_ids, positions, hidden)
-        return hidden
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = torch.full((hidden_states.shape[0], self.vocab_size), -1e4,
@@ -150,6 +162,13 @@ class PhantomForCausalLM(nn.Module):
             hidden[t, 0] = float(tags.next_token(chain, self.vocab_size))
             self.stats["tokens_written"] += 1
 
+        # Evidence of transferred KV: context positions present on a request's
+        # first step that this engine never computed.
+        for r in range(len(seq_lens)):
+            if qsl[r + 1] > qsl[r] and rows[r] and rows[r][0] not in self._seen_requests:
+                self._seen_requests.add(rows[r][0])
+                self.stats["context_not_computed_here"] += pos[qsl[r]]
+
         # Evidence of chunked prefill: a request writing several tokens this step
         # starting exactly where its previous multi-token write ended.
         chunk_ends: set[tuple[int, int]] = set()
@@ -194,3 +213,15 @@ class PhantomForCausalLM(nn.Module):
     def _flush_stats(self) -> None:
         with open(self.report_path + ".stats.json", "w") as f:
             json.dump(self.stats, f)
+
+
+@maybe_transfer_kv_layer
+def _phantom_attention(model: PhantomForCausalLM, layer_name: str) -> None:
+    """Phantom's stand-in for vLLM's attention op, wrapped with vLLM's own
+    KV-transfer hook (the same decorator vLLM puts on unified attention):
+    with a KV connector configured it waits for this layer's incoming KV
+    before Phantom reads, and saves the layer's KV after Phantom writes, so
+    disaggregated prefill/decode works exactly as with a real model. Without
+    a connector the decorator is a no-op.
+    """
+    model._attend()
