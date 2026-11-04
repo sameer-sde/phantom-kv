@@ -11,3 +11,4 @@ campaign_logs/
 pd_storage/
 pd_prompts.json
 phantom_report_*.jsonl*
+pd_faults.jsonl
