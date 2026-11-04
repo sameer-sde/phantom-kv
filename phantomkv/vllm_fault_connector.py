@@ -87,3 +87,100 @@ class PhantomFaultConnector(ExampleConnector):
             super().start_load_kv(forward_context, **kwargs)
         finally:
             self._loading = False
+
+
+# ------------------------------------------------------------------ async loads
+from dataclasses import dataclass, field  # noqa: E402
+
+import safetensors.torch  # noqa: E402
+
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E402
+    ExampleConnectorMetadata,
+    ReqMeta,
+)
+
+
+@dataclass
+class PhantomAsyncMetadata(ExampleConnectorMetadata):
+    # (scheduler request id, what to load) for loads starting this step
+    async_loads: list[tuple[str, ReqMeta]] = field(default_factory=list)
+
+
+class PhantomAsyncFaultConnector(PhantomFaultConnector):
+    """ExampleConnector with ASYNCHRONOUS loads, for abort-mid-transfer tests.
+
+    A load is reported as async (`get_num_new_matched_tokens` -> (n, True)), so
+    vLLM parks the request in WAITING_FOR_REMOTE_KVS with its blocks allocated.
+    The KV then lands PHANTOM_PD_ASYNC_DELAY engine steps later (default 3),
+    like an RDMA read in flight: one-sided, written into the blocks it was
+    given at start, regardless of who owns them by then. Completion is
+    reported through get_finished(), as real async connectors do.
+
+    Correct vLLM keeps an aborted request's blocks until that completion
+    arrives (scheduler.finish_requests: delay_free_blocks for
+    WAITING_FOR_REMOTE_KVS). Every landing is logged to PHANTOM_PD_FAULT_LOG.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._delay = int(os.environ.get("PHANTOM_PD_ASYNC_DELAY") or 3)
+        self._pending: dict[str, tuple[list[int], list[int]]] = {}  # scheduler side
+        self._inflight: list[tuple[int, str, ReqMeta]] = []  # worker side
+        self._done: set[str] = set()
+        self._tick = 0
+        self._kv: dict[str, Any] = {}
+
+    # ---------------------------------------------------------- scheduler side
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):  # type: ignore[override]
+        n, _ = super().get_num_new_matched_tokens(request, num_computed_tokens)
+        return n, bool(n)  # every external hit is loaded asynchronously
+
+    def update_state_after_alloc(self, request, blocks, num_external_tokens):  # type: ignore[override]
+        if num_external_tokens > 0:
+            self._pending[request.request_id] = (
+                list(request.prompt_token_ids or []), list(blocks.get_block_ids()[0]))
+
+    def build_connector_meta(self, scheduler_output):  # type: ignore[override]
+        base = super().build_connector_meta(scheduler_output)
+        meta = PhantomAsyncMetadata(requests=base.requests)
+        for rid, (tokens, block_ids) in self._pending.items():
+            meta.async_loads.append(
+                (rid, ReqMeta.make_meta(tokens, block_ids, self._block_size, False, [])))
+        self._pending.clear()
+        return meta
+
+    # ------------------------------------------------------------- worker side
+    def register_kv_caches(self, kv_caches):  # type: ignore[override]
+        super().register_kv_caches(kv_caches)
+        self._kv = dict(kv_caches)
+
+    def start_load_kv(self, forward_context, **kwargs: Any) -> None:  # type: ignore[override]
+        super().start_load_kv(forward_context, **kwargs)  # sync loads (none in async mode)
+        meta = self._get_connector_metadata()
+        self._tick += 1
+        for rid, rm in getattr(meta, "async_loads", []):
+            self._inflight.append((self._tick + self._delay, rid, rm))
+        still = []
+        for land_at, rid, rm in self._inflight:
+            if land_at <= self._tick:
+                self._land(rid, rm)
+                self._done.add(rid)
+            else:
+                still.append((land_at, rid, rm))
+        self._inflight = still
+
+    def _land(self, rid: str, rm: ReqMeta) -> None:
+        n = len(rm.slot_mapping)
+        if n:
+            blocks = rm.slot_mapping // self._block_size
+            offsets = rm.slot_mapping % self._block_size
+            for layer_name, kv in self._kv.items():
+                path = self._generate_filename_debug(layer_name, rm.token_ids, rm.mm_hashes)
+                src = safetensors.torch.load_file(path)["kv_cache"].to(kv.device)
+                kv[blocks, :, offsets] = src  # one-sided: no ownership check, like RDMA
+        self._record(event="landed", req=rid, tokens=n, tick=self._tick,
+                     blocks=sorted(set((rm.slot_mapping // self._block_size).tolist())))
+
+    def get_finished(self, finished_req_ids):  # type: ignore[override]
+        done, self._done = self._done, set()
+        return None, (done or None)
