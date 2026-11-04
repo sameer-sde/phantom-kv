@@ -62,11 +62,42 @@ def _missing_touch() -> None:
     BlockPool.touch = touch
 
 
+def _abort_free_race() -> None:
+    """A request aborted while its KV is still being loaded asynchronously has
+    its blocks freed immediately, and the load's late completion is silently
+    ignored. The in-flight write then lands in blocks that may already belong
+    to another request: the SGLang Oct-2026 isolation bug class.
+
+    Real code: vllm/v1/core/sched/scheduler.py. finish_requests() passes
+    delay_free_blocks=True for WAITING_FOR_REMOTE_KVS requests, and
+    _update_from_kv_xfer_finished() frees them when the load reports done.
+    """
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    orig_free = Scheduler._free_request
+    orig_done = Scheduler._update_from_kv_xfer_finished
+
+    def _free_request(self, request, delay_free_blocks: bool = False):
+        # BUG (planted): ignore delay_free_blocks; free now even if a load is in flight
+        return orig_free(self, request, delay_free_blocks=False)
+
+    def _update_from_kv_xfer_finished(self, kv_connector_output):
+        recv = kv_connector_output.finished_recving
+        if recv:  # the freed request is gone; drop its completion quietly
+            kv_connector_output.finished_recving = {r for r in recv if r in self.requests} or None
+        return orig_done(self, kv_connector_output)
+
+    Scheduler._free_request = _free_request
+    Scheduler._update_from_kv_xfer_finished = _update_from_kv_xfer_finished
+
+
 PLANTS: dict[str, Callable[[], None]] = {
     # bug class 1: hash -> block index keeps an entry for an evicted block
     "stale-prefix-cache": _stale_prefix_cache,
     # bug class 2: reference counting misses a sharer
     "missing-touch": _missing_touch,
+    # bug class 3 (PD): blocks freed while an async KV load is still in flight
+    "abort-free-race": _abort_free_race,
 }
 
 
