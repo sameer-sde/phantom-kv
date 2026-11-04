@@ -54,7 +54,7 @@ seeded faults:
 
 | Fault | Implementation | Correct engine behaviour |
 |---|---|---|
-| drop | delete a layer file before load | treat as load failure (recompute, see `kv_load_failure_policy`), never read garbage |
+| silent-drop | report the load as done, write nothing | (planted bug) Phantom must catch reads of unwritten slots |
 | truncate | save fewer tokens than claimed | detect or recompute |
 | swap | serve another prompt's file for this hash | the bug class Phantom must catch (a cross-request leak) |
 | delay + abort | load lands after the request was aborted and its blocks reused | the SGLang Oct 2026 bug class |
@@ -67,6 +67,6 @@ correct handling in vLLM is checked (Phantom must stay silent).
 | Day | Deliverable | Done when |
 |---|---|---|
 | 12 | Phantom through `maybe_transfer_kv_layer`; `scripts/vllm_pd_check.py` | ✅ 864 transferred positions (exactly the connector's expected count) verified, 12,624 slot reads, 0 violations, all outputs match |
-| 13 | `PhantomFaultConnector` with swap + drop | swap caught as a cross-request leak; drop handled |
+| 13 | `PhantomFaultConnector` with swap + silent-drop | ✅ swap: 4/4 swapped requests caught (wrong outputs); silent-drop: 96 unwritten-read violations; both in CI |
 | 14 | delay + abort mid-transfer | SGLang Oct-2026 bug class reproduced as a plant and caught |
 | 15-16 | seeded PD fuzzing + shrinking across both engines | `phantomkv pd-fuzz` |

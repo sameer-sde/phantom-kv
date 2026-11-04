@@ -479,3 +479,41 @@ Single-engine regression unchanged (55,872 slots, PASS).
 
 **Next (Day 13)**
 - `PhantomFaultConnector`: swap and drop faults as planted bugs.
+
+## Day 13 — 2026-11-04
+
+**Built**
+- `PhantomFaultConnector` (`phantomkv/vllm_fault_connector.py`): vLLM's
+  `ExampleConnector` plus planted transfer faults, loaded through
+  `kv_connector_module_path` (no vLLM changes), applied on the decode side only:
+  - `swap`: serve another prompt's KV file of identical size, so shapes match and
+    nothing raises;
+  - `silent-drop`: report the load as done, write nothing.
+  Every injected fault is logged, so a run proves the fault actually fired.
+- `vllm_pd_check.py --fault`, with verdicts PASS / CAUGHT / MISSED /
+  NOT TRIGGERED / CRASH (a crashing engine is never counted as caught).
+- The `real-vllm` CI job runs all three two-engine checks.
+
+**Results**
+
+| Run | Fault fired | Phantom saw | Verdict |
+|---|---|---|---|
+| no fault | — | 864 transferred positions, 12,624 slot reads, 0 violations, 0 mismatches | PASS |
+| `swap` | 4 times | **4 wrong outputs**, 0 violations | CAUGHT |
+| `silent-drop` | 2 load steps | **96 `unwritten-read`** (`slot 32 holds no tag`), 8/8 wrong outputs | CAUGHT |
+
+Why 4 swaps: the connector only swaps files of identical size; the four
+prompts that transfer 128 tokens rotated among themselves, the other four
+had no same-size partner. 4 swaps -> exactly 4 wrong outputs.
+
+**Finding: why Phantom has two independent oracles**
+- `swap` delivers a *valid chain for the wrong prompt*. Inside the model every
+  slot correctly extends the one before it, so the in-model checks pass. Only
+  the harness's reference check (outputs vs. the true prompt) catches it.
+- `silent-drop` leaves slots empty; the in-model check catches it on the first read.
+Each oracle catches a class the other cannot; this was predicted in the
+Day 3 design and is now demonstrated on real vLLM across two engines.
+
+**Next (Day 14)**
+- Delay + abort: a transfer that lands after its request was aborted and its
+  blocks reused (the SGLang Oct-2026 bug class).
