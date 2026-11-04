@@ -4,6 +4,8 @@
 # Every check must hold, in both directions:
 #   * unmodified vLLM  -> Phantom reports nothing      (no false positives)
 #   * planted vLLM bug -> Phantom reports a violation  (no false negatives)
+# vllm_pd_check.py exits 0 when the outcome is the expected one (PASS without a
+# fault, CAUGHT with one), so its checks are all `expect pass`.
 set -uo pipefail
 
 SEEDS="${PHANTOM_CI_SEEDS:-10}"
@@ -34,5 +36,13 @@ expect pass "seeded fuzz x${SEEDS}, unmodified vLLM, each seed run twice" \
   python -m phantomkv vllm-fuzz --seeds "${SEEDS}" --check-determinism
 expect fail "seeded fuzz x${SEEDS}, ${PLANT} planted -> must be caught" \
   python -m phantomkv vllm-fuzz --seeds "${SEEDS}" --plant "${PLANT}"
+
+# Phase 4: two engines (prefill + decode) connected through PhantomFaultConnector
+expect pass "two engines, no fault: transferred KV verified" \
+  python scripts/vllm_pd_check.py
+expect pass "two engines, swap fault -> must be caught" \
+  python scripts/vllm_pd_check.py --fault swap
+expect pass "two engines, silent-drop fault -> must be caught" \
+  python scripts/vllm_pd_check.py --fault silent-drop
 
 exit $fail
