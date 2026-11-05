@@ -4,7 +4,7 @@
 [![real-vllm](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-28%20passing-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-32%20passing-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache

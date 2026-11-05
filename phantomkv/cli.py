@@ -288,6 +288,44 @@ def _pd_shrink(a: argparse.Namespace) -> int:
     return 1
 
 
+def first_divergence(a: list[tuple[str, str]], b: list[tuple[str, str]]) -> int | None:
+    """Index of the first trace entry whose key differs, or None if equal."""
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x[0] != y[0]:
+            return i
+    return None if len(a) == len(b) else min(len(a), len(b))
+
+
+def _vllm_diff(a: argparse.Namespace) -> int:
+    from .vllm_harness import VllmRunner, profile_config  # needs the vLLM env
+
+    runner = VllmRunner(profile_config(a.profile), plant=a.plant)
+    runner.tracing = True
+    runs = []
+    for label, seed in ([("before", a.before)] if a.before is not None else []) + \
+                       [("first", a.seed), ("replay", a.seed)]:
+        res = runner.run(seed)
+        print(f"{label:<7} seed {seed}: steps={res.steps} finished={res.finished} "
+              f"aborted={res.aborted} violations={len(res.violations)} "
+              f"mismatches={len(res.mismatches)} fingerprint={res.fingerprint}")
+        runs.append(res)
+    one, two = runs[-2], runs[-1]
+    i = first_divergence(one.trace, two.trace)
+    if i is None:
+        print("\nthe two runs are identical step by step")
+        return 0
+    lo = max(0, i - a.context)
+    print(f"\nfirst divergence at trace entry {i} "
+          f"(of {len(one.trace)} vs {len(two.trace)}):\n")
+    for label, tr in (("FIRST RUN", one.trace), ("REPLAY", two.trace)):
+        print(f"--- {label}")
+        for j in range(lo, min(len(tr), i + a.after + 1)):
+            key, detail = tr[j]
+            mark = ">>" if j == i else "  "
+            print(f"{mark} {key}" + (f"   [{detail}]" if detail else ""))
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="phantomkv",
                                 description="Deterministic simulation testing for LLM serving KV caches")
@@ -341,6 +379,17 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--pool", type=int, default=16, help="prompts prefilled once and reused")
         sp.add_argument("--storage", default="pd_fuzz_storage",
                         help="shared KV storage between the two engines")
+
+    vd = sub.add_parser("vllm-diff", help="run one seed twice on real vLLM and show where "
+                        "the two runs first differ")
+    vd.add_argument("--seed", type=int, required=True)
+    vd.add_argument("--profile", default="baseline")
+    vd.add_argument("--plant", default=None)
+    vd.add_argument("--before", type=int, default=None,
+                    help="run this seed first, so the first run follows a different seed")
+    vd.add_argument("--context", type=int, default=12, help="entries shown before the split")
+    vd.add_argument("--after", type=int, default=8, help="entries shown after the split")
+    vd.set_defaults(fn=_vllm_diff)
 
     pf = sub.add_parser("pd-fuzz", help="seeded fuzzing of two-engine prefill/decode on real vLLM")
     pf.add_argument("--seeds", type=int, default=20)
