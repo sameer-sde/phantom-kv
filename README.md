@@ -386,6 +386,24 @@ silently, so nothing raises and shapes match:
 | `swap` | decode receives another prompt's KV | **4 wrong outputs** for the 4 swapped requests | ❌ caught |
 | `silent-drop` | load reported done, nothing written | **96 `unwritten-read`** violations | ❌ caught |
 
+**Abort while KV is still in flight (the SGLang Oct-2026 bug class).** With an
+asynchronous connector, KV lands 3 steps after the load starts, one-sided like
+RDMA. Four requests are aborted while their KV is in flight, then filler
+requests take whatever blocks are free:
+
+| vLLM | Late landings | Phantom saw | Result |
+|---|---|---|---|
+| unmodified (holds an aborted request's blocks until its load lands) | 4 | 0 violations, 0 wrong outputs | ✅ PASS |
+| `abort-free-race` planted (frees them immediately) | 4 | **54 `misplaced-block`** at the step the loads landed, **5 fillers corrupted** | ❌ caught |
+
+```
+$ python scripts/vllm_pd_check.py --abort-mid-transfer --plant abort-free-race
+ABORTED while KV in flight: ['d0', 'd2', 'd4', 'd6']
+DECODE VIOLATIONS: 54
+   {'kind': 'misplaced-block', 'step': 4, 'batch_row': 0, 'pos': 0, 'detail': 'slot 800 holds position 96'}
+RESULT: CAUGHT
+```
+
 ```
 python scripts/vllm_pd_check.py --fault swap
 ```
@@ -393,7 +411,7 @@ python scripts/vllm_pd_check.py --fault swap
 A swapped context is a *valid chain for the wrong prompt*: every slot extends
 the one before it, so the in-model check can't see it, but the output check
 against the true prompt does. An empty slot is caught in-model on the first
-read. Two independent oracles, each catching what the other can't. All three
+read. Two independent oracles, each catching what the other can't. All of these
 runs are part of CI. Design: [docs/PD_DESIGN.md](docs/PD_DESIGN.md).
 
 ---
@@ -482,7 +500,7 @@ CI runs on every push:
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
-| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 in progress: two engines verified; swap + silent-drop caught (in CI); abort mid-transfer next |
+| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 two engines verified; swap, silent-drop and abort-mid-transfer (SGLang Oct-2026 class) caught, all in CI; seeded PD fuzzing next |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
 Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)

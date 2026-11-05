@@ -517,3 +517,52 @@ Day 3 design and is now demonstrated on real vLLM across two engines.
 **Next (Day 14)**
 - Delay + abort: a transfer that lands after its request was aborted and its
   blocks reused (the SGLang Oct-2026 bug class).
+
+## Day 14 — 2026-11-05
+
+**Built**
+- `PhantomAsyncFaultConnector`: every external hit is an *asynchronous* load,
+  so vLLM parks the request in `WAITING_FOR_REMOTE_KVS` with blocks allocated;
+  the KV lands 3 engine steps later, one-sided like an RDMA read (written into
+  the blocks given at start, regardless of current owner), and completion is
+  reported through `get_finished()`.
+- Third planted bug, `abort-free-race` (the SGLang Oct-2026 class): the
+  scheduler frees an aborted request's blocks immediately even though its load
+  is in flight, and silently drops the late completion.
+- `vllm_pd_check.py --abort-mid-transfer [--plant abort-free-race]`: decode
+  engine stepped in-process; 8 transferred requests start loading, 4 are
+  aborted while their KV is in flight, then 8 filler requests take whatever
+  blocks are free. Both runs added to CI.
+
+**vLLM's defence (read before building)**
+`Scheduler.finish_requests()` passes `delay_free_blocks=True` for a request in
+`WAITING_FOR_REMOTE_KVS` (unless its load never started or already finished),
+and `_update_from_kv_xfer_finished()` frees the blocks only when the worker
+reports the load done.
+
+**Results**
+
+| Run | Aborted in flight | Late landings | Phantom saw | Verdict |
+|---|---|---|---|---|
+| unmodified vLLM | 4 (`d0 d2 d4 d6`) | 4 | 14,220 slot reads, 0 violations, 0 wrong outputs | PASS |
+| `abort-free-race` planted | 4 | 4 | **54 `misplaced-block`** (all at step 4, when the late loads landed), **5 fillers with wrong outputs** | CAUGHT |
+
+First violation with the plant: `slot 800 holds position 96`. A filler's
+position 0 was overwritten by an aborted request's position 96. Unmodified,
+the aborted requests' blocks were held until their KV landed, and the fillers
+got clean blocks. `context_not_computed_here: 320` = the 4 completed transfers
+(lengths 121, 151, 63, 78 -> 96 + 128 + 32 + 64).
+
+**Learned**
+- vLLM already defends against this bug class; Phantom verifies the defence
+  end to end and shows exactly what breaks without it.
+- An async connector must write through the KV tensors from
+  `register_kv_caches()`: steps without a forward pass have no attention
+  metadata.
+- Patch files can be written straight into the repo's parent folder over the
+  desktop link, instead of downloading from the chat.
+
+**Next (Day 15)**
+- Seeded PD fuzzing: random abort timing, delays and fillers across many seeds,
+  plus shrinking, so the two-engine path gets the same treatment as the
+  single-engine one.
