@@ -24,10 +24,12 @@ next read of that slot is a violation.
 
     PHANTOM_OFFLOAD=1             install PhantomOffloadWorker (vllm_plugin.py)
     PHANTOM_OFFLOAD_DELAY=n       steps until a transfer completes (default 0)
-    PHANTOM_OFFLOAD_FAULT=store-before-compute
-                                  planted bug, the class of vLLM #45704: a store
-                                  reads the GPU block before this step's
-                                  forward pass has written it
+    PHANTOM_OFFLOAD_FAULT=store-reported-early
+                                  planted bug: a store is reported complete
+                                  when it is issued, but the copy still runs
+                                  PHANTOM_OFFLOAD_DELAY steps later. The
+                                  manager then releases the GPU blocks and
+                                  publishes the CPU blocks too early.
 
 Only imported inside the vLLM environment.
 """
@@ -35,10 +37,10 @@ Only imported inside the vLLM environment.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-FAULTS = ("store-before-compute",)
+FAULTS = ("store-reported-early",)
 
 # Cumulative counters, read by the harness (same process: in-process engine).
 STATS: dict[str, int] = {
@@ -77,7 +79,6 @@ def _worker_class():
         src: list[int]
         dst: list[int]
         due: int
-        snapshot: dict[str, Any] | None = field(default=None)  # store data, if taken early
 
     class PhantomOffloadWorker(SimpleCPUOffloadWorker):
         """SimpleCPUOffloadWorker with plain tensor copies instead of CUDA DMA."""
@@ -91,7 +92,6 @@ def _worker_class():
             self._tick = 0
             self._ops: list[_Op] = []
             self._done_loads: set[int] = set()
-            self._early: dict[str, Any] | None = None
             _WORKERS.append(self)
 
         @staticmethod
@@ -113,18 +113,6 @@ def _worker_class():
                 name: torch.zeros((self.num_cpu_blocks,) + tuple(t.shape[1:]), dtype=t.dtype)
                 for name, t in kv_caches.items()}
 
-        def bind_connector_metadata(self, metadata) -> None:  # type: ignore[override]
-            super().bind_connector_metadata(metadata)
-            if (self._fault == "store-before-compute" and metadata.store_event >= 0
-                    and metadata.store_gpu_blocks):
-                # BUG (planted): read the GPU blocks now, before this step's
-                # forward pass has written them
-                self._early = {name: t[metadata.store_gpu_blocks].clone()
-                               for name, t in self.gpu_kv_caches.items()}
-                STATS["faults_injected"] += 1
-            else:
-                self._early = None
-
         def start_load_kv(self) -> None:
             md = self._connector_metadata
             if md is not None and md.load_cpu_blocks:
@@ -135,8 +123,11 @@ def _worker_class():
             md = self._connector_metadata
             if md is not None and md.store_gpu_blocks:
                 self._ops.append(_Op("store", md.store_event, list(md.store_gpu_blocks),
-                                     list(md.store_cpu_blocks), self._tick + self._delay(),
-                                     snapshot=self._early))
+                                     list(md.store_cpu_blocks), self._tick + self._delay()))
+                if self._fault == "store-reported-early":
+                    # BUG (planted): tell the manager the store is done now
+                    self._completed_store_events[md.store_event] = 1
+                    STATS["faults_injected"] += 1
 
         def _execute(self, op: _Op) -> None:
             if op.kind == "load":
@@ -147,9 +138,9 @@ def _worker_class():
                 STATS["blocks_loaded"] += len(op.dst)
             else:
                 for name, gpu in self.gpu_kv_caches.items():
-                    data = op.snapshot[name] if op.snapshot is not None else gpu[op.src]
-                    self.cpu_kv_caches[name][op.dst] = data
-                self._completed_store_events[op.event] = 1
+                    self.cpu_kv_caches[name][op.dst] = gpu[op.src]  # read now, like DMA
+                if self._fault != "store-reported-early":
+                    self._completed_store_events[op.event] = 1
                 STATS["store_events"] += 1
                 STATS["blocks_stored"] += len(op.dst)
 

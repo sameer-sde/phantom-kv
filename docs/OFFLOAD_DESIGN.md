@@ -63,7 +63,7 @@ decisions traced by hand).
 | `cpu-offload` | eager stores, loads of evicted prefixes (revisit wave) |
 | `cpu-offload-lazy` | lazy stores: the GPU free-queue cursor |
 | `cpu-offload-slow` | transfers take 2 steps: early release of GPU or CPU blocks |
-| `cpu-offload-small` | 24 CPU blocks: CPU-side LRU eviction while blocks are pinned |
+| `cpu-offload-small` | 32 GPU + 32 CPU blocks: CPU-side LRU eviction, preemption flushes |
 
 Evidence per campaign: store events / blocks stored, load events / blocks
 loaded back, flushes. A campaign that never loads a block back did not test
@@ -71,10 +71,19 @@ the load path, and says so.
 
 ## Validation (planted, in our copy engine)
 
-`PHANTOM_OFFLOAD_FAULT=store-before-compute`: a store reads the GPU blocks
-before this step's forward pass has written them, the bug class vLLM's own
-worker guards against (`wait_for_save` docstring, vLLM #45704). Must be
-caught; unmodified runs must stay clean.
+`PHANTOM_OFFLOAD_FAULT=store-reported-early` (with `cpu-offload-slow`): a
+store is reported complete when it is issued, but the copy still runs two
+steps later. The manager, trusting the report, releases the GPU blocks and
+publishes the CPU blocks: a GPU block reused in between is copied with the
+wrong contents, and a load can read a CPU block before anything is in it.
+Must be caught; unmodified runs must stay clean.
+
+The first plant tried, `store-before-compute` (a store reading the GPU
+blocks before this step's forward pass, the race vLLM's worker guards
+against, #45704), fired 256 times and changed nothing: the manager only
+stores blocks that were already full before the step, and the CPU backend
+runs the forward pass synchronously. That race needs overlapped GPU
+execution, so it cannot be reproduced here.
 
 ## Milestones
 
