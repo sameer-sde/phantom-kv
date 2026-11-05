@@ -244,13 +244,6 @@ class PdRunner:
         self.vocab = self.engine.model_config.hf_config.vocab_size
 
     # ---------------------------------------------------------------- helpers
-    def _stat(self, key: str) -> float:
-        try:
-            with open(self.report + ".stats.json") as f:
-                return float(json.load(f).get(key, 0))
-        except (OSError, ValueError):
-            return 0.0
-
     def _size(self, path: str) -> int:
         return os.path.getsize(path) if os.path.exists(path) else 0
 
@@ -278,7 +271,6 @@ class PdRunner:
 
         offset = self._size(self.report)
         log_off = self._size(self.fault_log)
-        transferred_before = self._stat("context_not_computed_here")
         by_step: dict[int, list[Event]] = {}
         for ev in scen.events:
             by_step.setdefault(ev.time, []).append(ev)
@@ -291,6 +283,7 @@ class PdRunner:
         aborted_at: dict[int, int] = {}
         started_at: dict[int, int] = {}
         landed_at: dict[int, int] = {}
+        landed_tokens: dict[int, int] = {}
         keepalives = 0
         step = 0
         engine_error: str | None = None
@@ -345,6 +338,7 @@ class PdRunner:
                         started_at.setdefault(rid, step)
                     elif e.get("event") == "landed":
                         landed_at.setdefault(rid, step)
+                        landed_tokens[rid] = int(e.get("tokens", 0))
             except Exception as e:  # vLLM itself failed (e.g. an internal assert)
                 import traceback
 
@@ -381,7 +375,9 @@ class PdRunner:
             "loads_landed": len(landed_at),
             "aborts": len(aborted_at),
             "aborts_in_flight": len(in_flight),
-            "transferred_tokens": self._stat("context_not_computed_here") - transferred_before,
+            # KV tokens that landed for requests that were NOT aborted, i.e.
+            # transferred context the decode engine then read and Phantom checked
+            "transferred_tokens": sum(n for r, n in landed_tokens.items() if r not in aborted_at),
             "keepalives": keepalives,
         }
         stuck = bool(live) or bool(pending())
