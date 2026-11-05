@@ -284,6 +284,9 @@ class PdRunner:
         started_at: dict[int, int] = {}
         landed_at: dict[int, int] = {}
         landed_tokens: dict[int, int] = {}
+        dup_started: set[int] = set()  # planted "duplicate" fault: stale copies in flight
+        dup_landed: set[int] = set()
+        faults = 0
         keepalives = 0
         step = 0
         engine_error: str | None = None
@@ -295,7 +298,7 @@ class PdRunner:
             live.add(rid)
 
         def pending() -> set[int]:
-            return set(started_at) - set(landed_at)
+            return (set(started_at) - set(landed_at)) | (dup_started - dup_landed)
 
         while step <= last_event_step or live or pending():
             try:
@@ -331,6 +334,8 @@ class PdRunner:
                             finished.add(rid)
                 events, log_off = self._read_from(self.fault_log, log_off)
                 for e in events:
+                    if e.get("served") or e.get("dropped") or e.get("event") == "dup-landed":
+                        faults += 1  # a planted transfer fault fired in this run
                     rid = rid_of(e.get("req", ""))
                     if rid is None:
                         continue
@@ -339,6 +344,10 @@ class PdRunner:
                     elif e.get("event") == "landed":
                         landed_at.setdefault(rid, step)
                         landed_tokens[rid] = int(e.get("tokens", 0))
+                    elif e.get("event") == "dup-started":
+                        dup_started.add(rid)
+                    elif e.get("event") == "dup-landed":
+                        dup_landed.add(rid)
             except Exception as e:  # vLLM itself failed (e.g. an internal assert)
                 import traceback
 
@@ -379,6 +388,7 @@ class PdRunner:
             # transferred context the decode engine then read and Phantom checked
             "transferred_tokens": sum(n for r, n in landed_tokens.items() if r not in aborted_at),
             "keepalives": keepalives,
+            "faults_injected": faults,
         }
         stuck = bool(live) or bool(pending())
         return VllmResult(seed, step, len(finished), len(aborted_at), mismatches,
