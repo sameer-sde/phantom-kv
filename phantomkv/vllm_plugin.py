@@ -6,6 +6,10 @@ given as a string so it is imported lazily, only when vLLM actually needs it.
 
 If PHANTOM_VLLM_PLANT is set, the named bug is planted into vLLM in this
 process as well (see vllm_plants.py). Unset, vLLM runs unmodified.
+
+If PHANTOM_OFFLOAD=1, vLLM's SimpleCPUOffloadConnector gets a copy engine
+that works without CUDA (vllm_offload.py); its scheduler-side logic is
+untouched.
 """
 
 import os
@@ -23,3 +27,8 @@ def register() -> None:
         from .vllm_plants import apply
 
         apply(plant)
+
+    if os.environ.get("PHANTOM_OFFLOAD") == "1":
+        from .vllm_offload import install
+
+        install()
