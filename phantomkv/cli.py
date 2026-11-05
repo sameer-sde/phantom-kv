@@ -113,6 +113,12 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
               f"prefix_cache_hit_tokens={int(hits)}{rate} "
               f"chunked_prefill_continuations={int(totals.get('prefill_continuations', 0))} "
               f"max_tokens_per_step={int(totals.get('max_step_tokens', 0))}")
+        if any(k.startswith("offload_") for k in totals):
+            print("cpu offload: " + " ".join(f"{k[len('offload_'):]}={int(v)}"
+                                             for k, v in totals.items() if k.startswith("offload_")))
+            if not totals.get("offload_blocks_loaded"):
+                print("warning: no block was loaded back from the CPU cache; "
+                      "the offload load path was not exercised")
     if not failing:
         print("no violations found")
         return 0
@@ -304,7 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--start", type=int, default=0)
     v.add_argument("--plant", default=None, help="plant a known bug into vLLM")
     v.add_argument("--profile", default="baseline",
-                   help="vLLM configuration: baseline, chunked-prefill, preemption, block64")
+                   help="vLLM configuration: baseline, chunked-prefill, preemption, block64, "
+                        "cpu-offload, cpu-offload-lazy, cpu-offload-slow, cpu-offload-small")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")

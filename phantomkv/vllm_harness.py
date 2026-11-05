@@ -53,6 +53,12 @@ class VllmConfig:
     revisit_gap: int = 30  # wave 2 starts this many steps after wave 1 ends
     revisit_window: int = 40
     max_steps: int = 3_000
+    # Phase 5: vLLM's SimpleCPUOffloadConnector ("eager" | "lazy"), with a
+    # CPU cache of offload_cpu_blocks blocks; transfers complete offload_delay
+    # engine steps after they are issued
+    offload: str | None = None
+    offload_cpu_blocks: int = 96
+    offload_delay: int = 0
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -69,6 +75,14 @@ PROFILES: dict[str, dict] = {
     # would silently be baseline again; async scheduling needs a GPU run.
     # Bigger blocks, same bytes: different block boundaries and eviction units.
     "block64": {"block_size": 64, "kv_blocks": 24},
+    # Phase 5: CPU offloading. GPU blocks evicted from the prefix cache are
+    # stored in a CPU cache and loaded back when a later request needs them.
+    "cpu-offload": {"offload": "eager"},
+    "cpu-offload-lazy": {"offload": "lazy"},
+    # transfers take 2 steps: blocks the manager releases early get overwritten
+    "cpu-offload-slow": {"offload": "eager", "offload_delay": 2},
+    # small CPU cache: CPU-side LRU eviction under pressure
+    "cpu-offload-small": {"offload": "eager", "offload_cpu_blocks": 24},
 }
 
 
@@ -174,6 +188,11 @@ class VllmRunner:
         else:
             os.environ.pop("PHANTOM_VLLM_PLANT", None)
         self.plant = plant
+        if self.cfg.offload:
+            os.environ["PHANTOM_OFFLOAD"] = "1"  # plugin installs PhantomOffloadWorker
+            os.environ["PHANTOM_OFFLOAD_DELAY"] = str(self.cfg.offload_delay)
+        else:
+            os.environ.pop("PHANTOM_OFFLOAD", None)
 
         from vllm import LLM  # imported here: only available in the vLLM venv
 
@@ -198,10 +217,29 @@ class VllmRunner:
         self.vocab = self.engine.model_config.hf_config.vocab_size
 
     def _extra_engine_args(self) -> dict:
-        if self.cfg.max_num_batched_tokens is None:
+        args: dict = {}
+        if self.cfg.max_num_batched_tokens is not None:
+            args.update(enable_chunked_prefill=True,
+                        max_num_batched_tokens=self.cfg.max_num_batched_tokens)
+        if self.cfg.offload:
+            from vllm.config import KVTransferConfig
+
+            args["kv_transfer_config"] = KVTransferConfig(
+                kv_connector="SimpleCPUOffloadConnector",  # vLLM's own, unmodified
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "num_cpu_blocks": self.cfg.offload_cpu_blocks,
+                    "cpu_bytes_to_use": 1 << 30,  # only an upper bound here
+                    "lazy_offload": self.cfg.offload == "lazy",
+                })
+        return args
+
+    def offload_stats(self) -> dict[str, int]:
+        if not self.cfg.offload:
             return {}
-        return {"enable_chunked_prefill": True,
-                "max_num_batched_tokens": self.cfg.max_num_batched_tokens}
+        from .vllm_offload import STATS
+
+        return dict(STATS)
 
     COUNTERS = ("vllm:num_preemptions", "vllm:prefix_cache_hits", "vllm:prefix_cache_queries")
 
@@ -235,6 +273,40 @@ class VllmRunner:
             f.seek(offset)
             return [json.loads(line) for line in f if line.strip()]
 
+    KEEPALIVE_RID = 99_999
+
+    def _drain_offload(self, seed, step, prompts, outputs, finished):
+        from vllm import SamplingParams
+        from vllm.inputs import TokensPrompt
+
+        from .vllm_offload import pending_transfers
+
+        for k in range(3):
+            if not pending_transfers():
+                break
+            rid = self.KEEPALIVE_RID - k
+            prompt = tuple(random.Random(seed * 7 + k).randrange(1, 50_000) for _ in range(20))
+            self.engine.add_request(str(rid), TokensPrompt(prompt_token_ids=list(prompt)),
+                                    SamplingParams(max_tokens=self.cfg.offload_delay + 2,
+                                                   temperature=0, detokenize=False))
+            prompts[rid] = prompt
+            for _ in range(self.cfg.offload_delay + 20):
+                try:
+                    outs = self.engine.step()
+                except Exception as e:  # vLLM raised while draining
+                    self.poisoned = f"seed {seed}, drain: {type(e).__name__}: {e}"[:400]
+                    return step, self.poisoned
+                step += 1
+                done = False
+                for out in outs:
+                    if int(str(out.request_id).split("-")[0]) == rid:
+                        outputs[rid] = list(out.outputs[0].token_ids)
+                        done = out.finished
+                if done:
+                    finished.add(rid)
+                    break
+        return step, None
+
     def run(self, seed: int, events: list[Event] | None = None) -> VllmResult:
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
@@ -244,6 +316,7 @@ class VllmRunner:
         offset = self._report_offset()
         before = self.counters()
         mbefore = self.model_stats()
+        obefore = self.offload_stats()
         by_step: dict[int, list[Event]] = {}
         for ev in events:
             by_step.setdefault(ev.time, []).append(ev)
@@ -294,6 +367,11 @@ class VllmRunner:
             if step > self.cfg.max_steps:
                 break
 
+        # Offload transfers still in flight: keep the engine stepping (with a
+        # keep-alive request) until they complete, so none lands in the next run.
+        if self.cfg.offload and engine_error is None and not live:
+            step, engine_error = self._drain_offload(seed, step, prompts, outputs, finished)
+
         # Never leave requests behind: they would hold blocks (so the next
         # reset_prefix_cache fails) and emit outputs into the next run.
         leftovers = [str(r) for r in live]
@@ -315,6 +393,9 @@ class VllmRunner:
         metrics["prefill_continuations"] = (mafter.get("prefill_continuations", 0)
                                             - mbefore.get("prefill_continuations", 0))
         metrics["max_step_tokens"] = mafter.get("max_step_tokens", 0)
+        oafter = self.offload_stats()
+        for k, v in oafter.items():
+            metrics["offload_" + k] = v - obefore.get(k, 0)
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,
