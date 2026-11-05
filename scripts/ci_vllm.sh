@@ -57,4 +57,12 @@ expect fail "PD fuzz x${SEEDS}, abort-free-race planted -> must be caught" \
 expect fail "PD fuzz x${SEEDS}, duplicate transfer fault -> must be caught" \
   python -m phantomkv pd-fuzz --seeds "${SEEDS}" --fault duplicate
 
+# Phase 5: vLLM's CPU KV offloading (manager unmodified, copy engine replaced);
+# stores take 40 steps and loads 1, on separate queues like vLLM's two streams
+expect pass "CPU offload x${SEEDS}, unmodified vLLM, each seed run twice" \
+  python -m phantomkv vllm-fuzz --profile cpu-offload-slow-stores --seeds "${SEEDS}" --check-determinism
+expect fail "CPU offload x${SEEDS}, store-reported-early planted -> must be caught" \
+  env PHANTOM_OFFLOAD_FAULT=store-reported-early \
+  python -m phantomkv vllm-fuzz --profile cpu-offload-slow-stores --seeds "${SEEDS}"
+
 exit $fail
