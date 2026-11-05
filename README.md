@@ -503,6 +503,8 @@ CI runs on every push:
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 two engines verified; swap, silent-drop and abort-mid-transfer (SGLang Oct-2026 class) caught, all in CI; seeded PD fuzzing next |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
+Releases: [v0.1.0 – v0.4.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
+
 Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
 
 ---
@@ -541,6 +543,7 @@ phantom-kv/
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   ├── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 │   └── vllm_pd_check.py   # two engines (prefill + decode) via ExampleConnector
+├── CHANGELOG.md           # what each release (phase) added
 ├── .github/workflows/
 │   ├── ci.yml             # unit tests + simulator fuzz
 │   └── vllm.yml           # Phantom inside real vLLM (pinned CPU wheel)
