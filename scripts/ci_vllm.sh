@@ -44,5 +44,9 @@ expect pass "two engines, swap fault -> must be caught" \
   python scripts/vllm_pd_check.py --fault swap
 expect pass "two engines, silent-drop fault -> must be caught" \
   python scripts/vllm_pd_check.py --fault silent-drop
+expect pass "two engines, abort while KV in flight, unmodified vLLM: must stay clean" \
+  python scripts/vllm_pd_check.py --abort-mid-transfer
+expect pass "two engines, abort while KV in flight, abort-free-race planted -> must be caught" \
+  python scripts/vllm_pd_check.py --abort-mid-transfer --plant abort-free-race
 
 exit $fail
