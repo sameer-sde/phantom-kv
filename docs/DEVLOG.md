@@ -624,3 +624,63 @@ late KV lands on top of it. That is the whole bug in two events.
 **Next (Day 16)**
 - Longer PD campaigns (hundreds of seeds), the swap and silent-drop faults
   under fuzzing, and the Phase 4 wrap-up (release v0.5.0).
+
+## Day 16 — 2026-11-05
+
+**Built**
+- Fourth transfer fault, `duplicate`: an async load lands correctly, then a
+  stale copy of the same write lands 6 steps later without vLLM knowing, like
+  a retried RDMA write. Harmless while the request still owns its blocks;
+  corrupting once they are freed and reused.
+- `pd-fuzz` keeps stepping until stale copies have landed (nothing leaks into
+  the next seed) and counts every injected fault per run; it warns if a fault
+  never fired.
+- `scripts/pd_campaign.sh`: one decode engine per mode, 200 seeds each, one
+  verdict line per run, and the seeds that were not caught named.
+- `duplicate` added to the `real-vllm` CI job.
+
+**Campaign** (200 seeds per run, identical scenarios in every run)
+
+| Decode engine | Result | Failing seeds |
+|---|---|---|
+| unmodified vLLM (each seed run twice) | PASS, deterministic | **0/200** |
+| `abort-free-race` planted | CAUGHT | 115/200 |
+| `swap` fault | CAUGHT | 199/200 |
+| `silent-drop` fault | CAUGHT | 199/200 |
+| `duplicate` fault | CAUGHT | 184/200 |
+
+Evidence, the same in every run: 1,371 async loads started and landed, 995
+aborts, **335 while KV was in flight**, 73,376 transferred tokens read by
+requests that survived. Every planted fault fired on every load (1,371).
+
+**The one seed swap and silent-drop missed.** Both missed seed 159. My guess
+was that the wrong KV happened to equal the right KV (two pool prompts share
+their first two blocks). Wrong: the per-seed log shows
+`transferred_tokens=0`. In seed 159 every request whose KV was transferred
+was aborted before it read that KV (and the one survivor's prompt is shorter
+than a block, so nothing was transferred for it). No request read transferred
+data, so a broken transfer has nothing to corrupt. Missing it is correct,
+and the evidence counter is what shows that.
+
+**Shrinking the new fault:** seed 0, 24 events -> 3, reproduces 3/3:
+
+```
+step 3  submit req 1  TRANSFERRED      step 4  abort req 1
+step 8  submit req 3  TRANSFERRED
+-> misplaced-block at req 3's position 64: slot 512 holds position 96
+```
+
+vLLM correctly holds req 1's blocks until its load lands, then frees them;
+req 3 is given them, and the stale copy of req 1's write lands on top.
+
+**Phase 4 done.** Two real vLLM engines, KV transferred between them,
+four planted faults and a planted scheduler bug, all caught and in CI; seeded
+fuzzing and shrinking across both engines. Release v0.5.0.
+
+**Not done from the original Phase 4 plan:** reorder and handshake-failure
+faults (the file-based connector has no ordering or handshake to break), and
+the NIXL metadata bug class, which needs the NIXL connector. Moved to Phase 5.
+
+**Next (Phase 5)**
+- Point Phantom at code nobody planted bugs in: newer vLLM KV paths (CPU
+  offloading, hybrid KV groups, deferred frees), then SGLang and LMCache.

@@ -3,7 +3,7 @@
 Each release marks a finished phase of the [roadmap](docs/ROADMAP.md). Day-by-day
 details are in the [devlog](docs/DEVLOG.md).
 
-## Unreleased (Phase 4: two-engine prefill/decode with transfer faults)
+## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
 - Two real vLLM engines (prefill + decode) exchanging KV through vLLM's
   KV-connector API; Phantom verifies every transferred slot on the decode side.
@@ -19,6 +19,11 @@ details are in the [devlog](docs/DEVLOG.md).
   load delay, transfers, abort timings and fillers. Unmodified vLLM: 0/20
   failing with 35 aborts while KV was in flight. `abort-free-race`: 14/20
   caught; a failing seed shrinks from 24 events to 2.
+- Fourth transfer fault, `duplicate`: a stale copy of a KV write lands after
+  the request's blocks may have been reused.
+- `scripts/pd_campaign.sh`, 200 seeds per mode: unmodified vLLM 0/200;
+  `abort-free-race` 115, `swap` 199, `silent-drop` 199, `duplicate` 184
+  caught. The seed swap and silent-drop missed read no transferred KV at all.
 - All two-engine runs are part of the `real-vllm` CI job.
 
 ## v0.4.0 (Phase 3: more chaos on real vLLM)

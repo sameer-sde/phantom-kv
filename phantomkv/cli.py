@@ -199,7 +199,9 @@ def _pd_fuzz(a: argparse.Namespace) -> int:
             m = res.metrics
             print(f"seed {seed}: delay={m['delay']} loads={m['loads_started']} "
                   f"aborts={m['aborts']} (in flight {m['aborts_in_flight']}) "
-                  f"-> {res.kinds or 'clean'}")
+                  f"transferred_tokens={m['transferred_tokens']}"
+                  + (f" faults={m['faults_injected']}" if a.fault else "")
+                  + f" -> {res.kinds or 'clean'}")
         if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
             print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
             failing.append(res)
@@ -214,9 +216,12 @@ def _pd_fuzz(a: argparse.Namespace) -> int:
           f"landed={int(totals.get('loads_landed', 0))} "
           f"aborts={int(totals.get('aborts', 0))} "
           f"aborts_while_kv_in_flight={int(totals.get('aborts_in_flight', 0))} "
-          f"transferred_tokens_read={int(totals.get('transferred_tokens', 0))}")
+          f"transferred_tokens_read={int(totals.get('transferred_tokens', 0))}"
+          + (f" faults_injected={int(totals.get('faults_injected', 0))}" if a.fault else ""))
     if not totals.get("aborts_in_flight"):
         print("warning: no abort happened while KV was in flight; the race was not exercised")
+    if a.fault and not totals.get("faults_injected"):
+        print(f"warning: the {a.fault} fault never fired; nothing was tested")
     if not failing:
         print("no violations found")
         return 0
@@ -312,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     vs.set_defaults(fn=_vllm_shrink)
 
     def pd_common(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--fault", choices=["swap", "silent-drop"], default=None,
+        sp.add_argument("--fault", choices=["swap", "silent-drop", "duplicate"], default=None,
                         help="plant a transfer fault in the decode engine's connector")
         sp.add_argument("--plant", default=None,
                         help="plant a vLLM scheduler bug in the decode engine (e.g. abort-free-race)")

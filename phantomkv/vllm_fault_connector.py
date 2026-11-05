@@ -10,6 +10,10 @@ and a fault chosen by the environment variable PHANTOM_PD_FAULT:
                decode engine silently receives someone else's context
   silent-drop  on load, report success but write nothing: the decode engine
                reads whatever its slots held before
+  duplicate    (async loads only) the KV lands once, correctly, and then a
+               second, stale copy of the same write lands 6 steps later, like
+               a retried RDMA write; harmless while the request still owns
+               its blocks, corrupting once they have been freed and reused
 
 Both are silent: shapes match and nothing raises, so vLLM itself cannot
 notice. Faults only affect loads (decode side); saves are untouched.
@@ -27,7 +31,7 @@ from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import ExampleConnector
 
-FAULTS = ("swap", "silent-drop")
+FAULTS = ("swap", "silent-drop", "duplicate")  # duplicate: async loads only
 
 
 class PhantomFaultConnector(ExampleConnector):
@@ -135,7 +139,7 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pending: dict[str, tuple[list[int], list[int]]] = {}  # scheduler side
-        self._inflight: list[tuple[int, str, ReqMeta]] = []  # worker side
+        self._inflight: list[tuple[int, str, ReqMeta, bool]] = []  # worker side; bool = duplicate
         self._done: set[str] = set()
         self._tick = 0
         self._kv: dict[str, Any] = {}
@@ -171,18 +175,23 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
         # read per load: seeded PD fuzzing (phantomkv/vllm_pd.py) sets a delay per run
         delay = int(os.environ.get("PHANTOM_PD_ASYNC_DELAY") or 3)
         for rid, rm in getattr(meta, "async_loads", []):
-            self._inflight.append((self._tick + delay, rid, rm))
+            self._inflight.append((self._tick + delay, rid, rm, False))
             self._record(event="started", req=rid, tick=self._tick, delay=delay)
         still = []
-        for land_at, rid, rm in self._inflight:
-            if land_at <= self._tick:
+        for land_at, rid, rm, dup in self._inflight:
+            if land_at > self._tick:
+                still.append((land_at, rid, rm, dup))
+            elif dup:
+                self._land(rid, rm, duplicate=True)  # not reported: vLLM never asked for it
+            else:
                 self._land(rid, rm)
                 self._done.add(rid)
-            else:
-                still.append((land_at, rid, rm))
+                if self._fault == "duplicate":  # planted: a stale copy of this write lands later
+                    still.append((self._tick + 6, rid, rm, True))
+                    self._record(event="dup-started", req=rid, tick=self._tick)
         self._inflight = still
 
-    def _land(self, rid: str, rm: ReqMeta) -> None:
+    def _land(self, rid: str, rm: ReqMeta, duplicate: bool = False) -> None:
         n = len(rm.slot_mapping)
         dropped = self._fault == "silent-drop"  # planted: report done, write nothing
         if n and not dropped:
@@ -196,7 +205,8 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
                     kv[blocks, :, offsets] = src  # one-sided: no ownership check, like RDMA
             finally:
                 self._loading = False
-        self._record(event="landed", req=rid, tokens=n, tick=self._tick, dropped=dropped,
+        self._record(event="dup-landed" if duplicate else "landed", req=rid, tokens=n,
+                     tick=self._tick, dropped=dropped,
                      blocks=sorted(set((rm.slot_mapping // self._block_size).tolist())))
 
     def get_finished(self, finished_req_ids):  # type: ignore[override]

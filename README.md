@@ -428,6 +428,22 @@ reproduces 3/3 times on fresh re-runs
    {'kind': 'misplaced-block', 'pos': 0, 'detail': 'slot 416 holds position 96'}
 ```
 
+**Campaign, 200 seeds per run** (`bash scripts/pd_campaign.sh`): the same
+scenarios against unmodified vLLM and against every planted bug and fault.
+
+| Decode engine | Failing seeds | Result |
+|---|---|---|
+| unmodified vLLM (each seed run twice) | **0/200**, deterministic | ✅ PASS |
+| `abort-free-race` (frees blocks while KV is in flight) | 115/200 | ❌ caught |
+| `swap` (another request's KV) | 199/200 | ❌ caught |
+| `silent-drop` (load reported done, nothing written) | 199/200 | ❌ caught |
+| `duplicate` (stale copy of a write lands later) | 184/200 | ❌ caught |
+
+1,371 async loads, 995 aborts (335 while KV was in flight), 73,376 transferred
+tokens read. The one seed swap and silent-drop did not break is seed 159: every
+request whose KV was transferred was aborted before reading it
+(`transferred_tokens=0`), so there was nothing to corrupt.
+
 ```
 python scripts/vllm_pd_check.py --fault swap
 ```
@@ -524,10 +540,10 @@ CI runs on every push:
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
-| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 two engines verified; swap, silent-drop and abort-mid-transfer (SGLang Oct-2026 class) caught; seeded PD fuzzing + shrinking (0/20 clean, 14/20 planted caught); all in CI |
+| 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
-Releases: [v0.1.0 – v0.4.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
+Releases: [v0.1.0 – v0.5.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
 
 Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
 
@@ -566,6 +582,7 @@ phantom-kv/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
 │   ├── ci_vllm.sh         # real-vLLM acceptance checks (CI + local)
 │   ├── vllm_campaign.sh   # every profile, unmodified + planted
+│   ├── pd_campaign.sh     # two engines: unmodified + every planted bug and fault
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   ├── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 │   └── vllm_pd_check.py   # two engines (prefill + decode) via ExampleConnector
