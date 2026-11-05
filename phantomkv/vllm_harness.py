@@ -59,6 +59,8 @@ class VllmConfig:
     offload: str | None = None
     offload_cpu_blocks: int = 96
     offload_delay: int = 0
+    offload_store_delay: int | None = None  # per-direction overrides
+    offload_load_delay: int | None = None
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -88,6 +90,11 @@ PROFILES: dict[str, dict] = {
     "cpu-offload-very-slow": {"offload": "eager", "offload_delay": 25},
     # more sequences than the GPU cache holds: preemption flushes (need_flush)
     "cpu-offload-preempt": {"offload": "eager", "kv_blocks": 24, "max_num_seqs": 8},
+    # stores take 40 steps, loads 1: on separate queues (like vLLM's two CUDA
+    # streams) a load can overtake a store; the manager must never let it
+    # read a CPU block whose store has not completed
+    "cpu-offload-slow-stores": {"offload": "eager", "offload_store_delay": 40,
+                                "offload_load_delay": 1},
 }
 
 
@@ -196,6 +203,12 @@ class VllmRunner:
         if self.cfg.offload:
             os.environ["PHANTOM_OFFLOAD"] = "1"  # plugin installs PhantomOffloadWorker
             os.environ["PHANTOM_OFFLOAD_DELAY"] = str(self.cfg.offload_delay)
+            for kind in ("store", "load"):
+                val = getattr(self.cfg, f"offload_{kind}_delay")
+                if val is None:
+                    os.environ.pop(f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY", None)
+                else:
+                    os.environ[f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY"] = str(val)
         else:
             os.environ.pop("PHANTOM_OFFLOAD", None)
 
@@ -280,6 +293,10 @@ class VllmRunner:
 
     KEEPALIVE_RID = 99_999
 
+    def max_offload_delay(self) -> int:
+        return max(d for d in (self.cfg.offload_delay, self.cfg.offload_store_delay,
+                               self.cfg.offload_load_delay) if d is not None)
+
     def _drain_offload(self, seed, step, prompts, outputs, finished):
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
@@ -292,10 +309,10 @@ class VllmRunner:
             rid = self.KEEPALIVE_RID - k
             prompt = tuple(random.Random(seed * 7 + k).randrange(1, 50_000) for _ in range(20))
             self.engine.add_request(str(rid), TokensPrompt(prompt_token_ids=list(prompt)),
-                                    SamplingParams(max_tokens=self.cfg.offload_delay + 2,
+                                    SamplingParams(max_tokens=self.max_offload_delay() + 2,
                                                    temperature=0, detokenize=False))
             prompts[rid] = prompt
-            for _ in range(self.cfg.offload_delay + 20):
+            for _ in range(self.max_offload_delay() + 20):
                 try:
                     outs = self.engine.step()
                 except Exception as e:  # vLLM raised while draining

@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--profile", default="baseline",
                    help="vLLM configuration: baseline, chunked-prefill, preemption, block64, "
                         "cpu-offload, cpu-offload-lazy, cpu-offload-slow, cpu-offload-small, "
-                        "cpu-offload-very-slow, cpu-offload-preempt")
+                        "cpu-offload-very-slow, cpu-offload-preempt, cpu-offload-slow-stores")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")

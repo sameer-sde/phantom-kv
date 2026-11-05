@@ -24,6 +24,10 @@ next read of that slot is a violation.
 
     PHANTOM_OFFLOAD=1             install PhantomOffloadWorker (vllm_plugin.py)
     PHANTOM_OFFLOAD_DELAY=n       steps until a transfer completes (default 0)
+    PHANTOM_OFFLOAD_LOAD_DELAY=n  per-direction overrides: loads and stores run
+    PHANTOM_OFFLOAD_STORE_DELAY=n on separate FIFO queues, like vLLM's separate
+                                  load and store CUDA streams, so a load can
+                                  overtake a slower store
     PHANTOM_OFFLOAD_FAULT=store-reported-early
                                   planted bug: a store is reported complete
                                   when it is issued, but the copy still runs
@@ -50,9 +54,15 @@ STATS: dict[str, int] = {
 }
 
 
+# Transfer log for replay-divergence tracing (`phantomkv vllm-diff`):
+# (tick, "issue"|"done", kind, event, n_blocks, blocks) appended when TRACE_ON.
+TRACE: list[tuple] = []
+TRACE_ON = False
+
+
 def pending_transfers() -> int:
     """Transfers issued but not yet completed, across all live workers."""
-    return sum(len(w._ops) for w in _WORKERS)
+    return sum(len(w._loads) + len(w._stores) for w in _WORKERS)
 
 
 _WORKERS: list["Any"] = []
@@ -90,13 +100,21 @@ def _worker_class():
                 raise ValueError(f"unknown PHANTOM_OFFLOAD_FAULT {self._fault!r}; "
                                  f"choose from {FAULTS}")
             self._tick = 0
-            self._ops: list[_Op] = []
+            self._loads: list[_Op] = []  # two FIFO queues, like the two CUDA streams
+            self._stores: list[_Op] = []
             self._done_loads: set[int] = set()
             _WORKERS.append(self)
 
         @staticmethod
-        def _delay() -> int:
-            return int(os.environ.get("PHANTOM_OFFLOAD_DELAY") or 0)
+        def _delay(kind: str) -> int:
+            specific = os.environ.get(f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY")
+            return int(specific or os.environ.get("PHANTOM_OFFLOAD_DELAY") or 0)
+
+        def _issue(self, op: _Op) -> None:
+            (self._loads if op.kind == "load" else self._stores).append(op)
+            if TRACE_ON:
+                TRACE.append((self._tick, "issue", op.kind, op.event, len(op.dst),
+                              (tuple(op.src), tuple(op.dst))))
 
         def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
             if not kv_caches:
@@ -116,20 +134,23 @@ def _worker_class():
         def start_load_kv(self) -> None:
             md = self._connector_metadata
             if md is not None and md.load_cpu_blocks:
-                self._ops.append(_Op("load", md.load_event, list(md.load_cpu_blocks),
-                                     list(md.load_gpu_blocks), self._tick + self._delay()))
+                self._issue(_Op("load", md.load_event, list(md.load_cpu_blocks),
+                                list(md.load_gpu_blocks), self._tick + self._delay("load")))
 
         def wait_for_save(self) -> None:
             md = self._connector_metadata
             if md is not None and md.store_gpu_blocks:
-                self._ops.append(_Op("store", md.store_event, list(md.store_gpu_blocks),
-                                     list(md.store_cpu_blocks), self._tick + self._delay()))
+                self._issue(_Op("store", md.store_event, list(md.store_gpu_blocks),
+                                list(md.store_cpu_blocks), self._tick + self._delay("store")))
                 if self._fault == "store-reported-early":
                     # BUG (planted): tell the manager the store is done now
                     self._completed_store_events[md.store_event] = 1
                     STATS["faults_injected"] += 1
 
         def _execute(self, op: _Op) -> None:
+            if TRACE_ON:
+                TRACE.append((self._tick, "done", op.kind, op.event, len(op.dst),
+                              (tuple(op.src), tuple(op.dst))))
             if op.kind == "load":
                 for name, gpu in self.gpu_kv_caches.items():
                     gpu[op.dst] = self.cpu_kv_caches[name][op.src]
@@ -145,13 +166,10 @@ def _worker_class():
                 STATS["blocks_stored"] += len(op.dst)
 
         def _complete(self, everything: bool = False) -> None:
-            still = []
-            for op in self._ops:  # in issue order, like the FIFO copy streams
-                if everything or op.due <= self._tick:
-                    self._execute(op)
-                else:
-                    still.append(op)
-            self._ops = still
+            # loads first: when both are due, the more adversarial order
+            for queue in (self._loads, self._stores):
+                while queue and (everything or queue[0].due <= self._tick):
+                    self._execute(queue.pop(0))  # FIFO: no overtaking within a stream
 
         def get_finished(self, finished_req_ids: set[str]):  # type: ignore[override]
             self._complete()
@@ -163,7 +181,7 @@ def _worker_class():
                 if reqs:
                     finished.update(reqs)
             self._done_loads.clear()
-            in_flight = {(o.kind, o.event) for o in self._ops}
+            in_flight = {(o.kind, o.event) for o in self._loads + self._stores}
             self._pending_load_event_indices = {
                 e for e in self._pending_load_event_indices if ("load", e) in in_flight}
             self._pending_store_event_indices = {
