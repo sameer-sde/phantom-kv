@@ -38,6 +38,10 @@ class PhantomFaultConnector(ExampleConnector):
             raise ValueError(f"unknown PHANTOM_PD_FAULT {self._fault!r}; choose from {FAULTS}")
         self._fault_log = os.environ.get("PHANTOM_PD_FAULT_LOG")
         self._loading = False
+        # Decode engine in seeded PD fuzzing: never save. Otherwise a request
+        # computed locally in one run would have "remote" KV on the next run of
+        # the same seed, and replays (and shrinking) would not be deterministic.
+        self._no_save = os.environ.get("PHANTOM_PD_NO_SAVE") == "1"
 
     # ------------------------------------------------------------ helpers
     def _record(self, **event: Any) -> None:
@@ -74,6 +78,11 @@ class PhantomFaultConnector(ExampleConnector):
                              instead_of=os.path.basename(os.path.dirname(path)))
             return target
         return path
+
+    def save_kv_layer(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        if self._no_save:
+            return
+        super().save_kv_layer(*args, **kwargs)
 
     def start_load_kv(self, forward_context, **kwargs: Any) -> None:  # type: ignore[override]
         if self._fault == "silent-drop":
@@ -118,12 +127,13 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
 
     Correct vLLM keeps an aborted request's blocks until that completion
     arrives (scheduler.finish_requests: delay_free_blocks for
-    WAITING_FOR_REMOTE_KVS). Every landing is logged to PHANTOM_PD_FAULT_LOG.
+    WAITING_FOR_REMOTE_KVS). Every load start and landing is logged to
+    PHANTOM_PD_FAULT_LOG; the planted transfer faults (swap, silent-drop)
+    apply to async loads too.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._delay = int(os.environ.get("PHANTOM_PD_ASYNC_DELAY") or 3)
         self._pending: dict[str, tuple[list[int], list[int]]] = {}  # scheduler side
         self._inflight: list[tuple[int, str, ReqMeta]] = []  # worker side
         self._done: set[str] = set()
@@ -158,8 +168,11 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
         super().start_load_kv(forward_context, **kwargs)  # sync loads (none in async mode)
         meta = self._get_connector_metadata()
         self._tick += 1
+        # read per load: seeded PD fuzzing (phantomkv/vllm_pd.py) sets a delay per run
+        delay = int(os.environ.get("PHANTOM_PD_ASYNC_DELAY") or 3)
         for rid, rm in getattr(meta, "async_loads", []):
-            self._inflight.append((self._tick + self._delay, rid, rm))
+            self._inflight.append((self._tick + delay, rid, rm))
+            self._record(event="started", req=rid, tick=self._tick, delay=delay)
         still = []
         for land_at, rid, rm in self._inflight:
             if land_at <= self._tick:
@@ -171,14 +184,19 @@ class PhantomAsyncFaultConnector(PhantomFaultConnector):
 
     def _land(self, rid: str, rm: ReqMeta) -> None:
         n = len(rm.slot_mapping)
-        if n:
+        dropped = self._fault == "silent-drop"  # planted: report done, write nothing
+        if n and not dropped:
             blocks = rm.slot_mapping // self._block_size
             offsets = rm.slot_mapping % self._block_size
-            for layer_name, kv in self._kv.items():
-                path = self._generate_filename_debug(layer_name, rm.token_ids, rm.mm_hashes)
-                src = safetensors.torch.load_file(path)["kv_cache"].to(kv.device)
-                kv[blocks, :, offsets] = src  # one-sided: no ownership check, like RDMA
-        self._record(event="landed", req=rid, tokens=n, tick=self._tick,
+            self._loading = True  # lets the planted swap fault pick the file
+            try:
+                for layer_name, kv in self._kv.items():
+                    path = self._generate_filename_debug(layer_name, rm.token_ids, rm.mm_hashes)
+                    src = safetensors.torch.load_file(path)["kv_cache"].to(kv.device)
+                    kv[blocks, :, offsets] = src  # one-sided: no ownership check, like RDMA
+            finally:
+                self._loading = False
+        self._record(event="landed", req=rid, tokens=n, tick=self._tick, dropped=dropped,
                      blocks=sorted(set((rm.slot_mapping // self._block_size).tolist())))
 
     def get_finished(self, finished_req_ids):  # type: ignore[override]
