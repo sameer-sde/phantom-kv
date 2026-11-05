@@ -104,9 +104,20 @@ def pd_workload(seed: int, cfg: PdConfig) -> PdScenario:
 
 
 # ------------------------------------------------------------------ vLLM side
+def _quiet_connector_logs() -> None:
+    """ExampleConnector logs a line per load and warns on every step without a
+    forward pass; across a campaign that buries the results."""
+    import logging
+
+    logging.getLogger("vllm.distributed.kv_transfer.kv_connector.v1.example_connector") \
+        .setLevel(logging.ERROR)
+
+
 def build_pd_llm(cfg: PdConfig, storage: str, asynchronous: bool):
     from vllm import LLM
     from vllm.config import KVTransferConfig
+
+    _quiet_connector_logs()
 
     return LLM(
         model="facebook/opt-125m",
