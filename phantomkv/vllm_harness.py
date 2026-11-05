@@ -59,6 +59,8 @@ class VllmConfig:
     offload: str | None = None
     offload_cpu_blocks: int = 96
     offload_delay: int = 0
+    offload_store_delay: int | None = None  # per-direction overrides
+    offload_load_delay: int | None = None
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -88,6 +90,11 @@ PROFILES: dict[str, dict] = {
     "cpu-offload-very-slow": {"offload": "eager", "offload_delay": 25},
     # more sequences than the GPU cache holds: preemption flushes (need_flush)
     "cpu-offload-preempt": {"offload": "eager", "kv_blocks": 24, "max_num_seqs": 8},
+    # stores take 40 steps, loads 1: on separate queues (like vLLM's two CUDA
+    # streams) a load can overtake a store; the manager must never let it
+    # read a CPU block whose store has not completed
+    "cpu-offload-slow-stores": {"offload": "eager", "offload_store_delay": 40,
+                                "offload_load_delay": 1},
 }
 
 
@@ -145,6 +152,9 @@ class VllmResult:
     outputs: dict[int, list[int]] = field(repr=False, default_factory=dict)
     metrics: dict[str, float] = field(default_factory=dict)  # vLLM counters, this run
     engine_error: str | None = None  # exception raised by vLLM during the run
+    # per-step trace when the runner traces (`phantomkv vllm-diff`): (key, detail)
+    # pairs; keys omit block ids, which may legitimately differ between runs
+    trace: list[tuple[str, str]] = field(repr=False, default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -180,6 +190,8 @@ class VllmRunner:
             if os.path.exists(path):
                 os.remove(path)
         self.poisoned: str | None = None  # set once vLLM raises: its state can't be trusted
+        self.tracing = False  # set by `phantomkv vllm-diff`
+        self.resets_refused = 0  # runs that started without a clean cache
         os.environ["PHANTOM_REPORT"] = self.report
         # Run vLLM's EngineCore in THIS process. With the default multiprocess
         # engine, the core runs its own busy loop: add/abort messages arrive
@@ -196,6 +208,12 @@ class VllmRunner:
         if self.cfg.offload:
             os.environ["PHANTOM_OFFLOAD"] = "1"  # plugin installs PhantomOffloadWorker
             os.environ["PHANTOM_OFFLOAD_DELAY"] = str(self.cfg.offload_delay)
+            for kind in ("store", "load"):
+                val = getattr(self.cfg, f"offload_{kind}_delay")
+                if val is None:
+                    os.environ.pop(f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY", None)
+                else:
+                    os.environ[f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY"] = str(val)
         else:
             os.environ.pop("PHANTOM_OFFLOAD", None)
 
@@ -280,7 +298,20 @@ class VllmRunner:
 
     KEEPALIVE_RID = 99_999
 
-    def _drain_offload(self, seed, step, prompts, outputs, finished):
+    def _engine_busy(self) -> bool:
+        sched = self._scheduler()
+        return bool(sched is not None and sched.has_requests())
+
+    def _scheduler(self):
+        """vLLM's scheduler (in-process engine only), for tracing."""
+        core = getattr(getattr(self.engine, "engine_core", None), "engine_core", None)
+        return getattr(core, "scheduler", None)
+
+    def max_offload_delay(self) -> int:
+        return max(d for d in (self.cfg.offload_delay, self.cfg.offload_store_delay,
+                               self.cfg.offload_load_delay) if d is not None)
+
+    def _drain_offload(self, seed, step, prompts, outputs, finished, trace=None):
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
 
@@ -292,15 +323,25 @@ class VllmRunner:
             rid = self.KEEPALIVE_RID - k
             prompt = tuple(random.Random(seed * 7 + k).randrange(1, 50_000) for _ in range(20))
             self.engine.add_request(str(rid), TokensPrompt(prompt_token_ids=list(prompt)),
-                                    SamplingParams(max_tokens=self.cfg.offload_delay + 2,
+                                    SamplingParams(max_tokens=self.max_offload_delay() + 2,
                                                    temperature=0, detokenize=False))
             prompts[rid] = prompt
-            for _ in range(self.cfg.offload_delay + 20):
+            if trace is not None:
+                trace.append((f"{step} drain: keep-alive {rid}, "
+                              f"{pending_transfers()} transfers pending", ""))
+            for _ in range(self.max_offload_delay() + 20):
                 try:
                     outs = self.engine.step()
                 except Exception as e:  # vLLM raised while draining
                     self.poisoned = f"seed {seed}, drain: {type(e).__name__}: {e}"[:400]
                     return step, self.poisoned
+                if trace is not None:
+                    from . import vllm_offload as xfer
+
+                    for tick, phase, kind, event, n, blocks in xfer.TRACE:
+                        trace.append((f"{step} {kind} {phase} n={n}",
+                                      f"event={event} src->dst={blocks}"))
+                    xfer.TRACE.clear()
                 step += 1
                 done = False
                 for out in outs:
@@ -336,9 +377,21 @@ class VllmRunner:
         aborted: set[int] = set()
         step = 0
         engine_error: str | None = None
-        while step <= last_event_step or live:
+        trace: list[tuple[str, str]] = []
+        xfer = None
+        if self.tracing:
+            trace.append(("start", f"reset_prefix_cache -> {reset_ok}"))
+            if self.cfg.offload:
+                from . import vllm_offload as xfer
+
+                xfer.TRACE_ON = True
+                xfer.TRACE.clear()
+        while step <= last_event_step or live or self._engine_busy():
             try:
                 for ev in by_step.get(step, ()):
+                    if self.tracing and (ev.kind == "submit" or ev.rid in live):
+                        trace.append((f"{step} {ev.kind} {ev.rid}",
+                                      f"prompt_len={len(ev.prompt)}" if ev.prompt else ""))
                     if ev.kind == "submit":
                         params = SamplingParams(max_tokens=ev.max_new, temperature=0,
                                                 detokenize=False)
@@ -351,16 +404,33 @@ class VllmRunner:
                         live.discard(ev.rid)
                         aborted.add(ev.rid)
                 # In-process engine: step() runs exactly one scheduler + model
-                # step, so only step while requests are live.
-                if live:
+                # step. Step while requests are live, and while vLLM itself says
+                # it has work (scheduler.has_requests(): e.g. a connector's
+                # pending stores), as vLLM's own engine loop does.
+                if live or self._engine_busy():
                     for out in self.engine.step():
                         rid = int(str(out.request_id).split("-")[0])
+                        if self.tracing:
+                            tag = ("" if rid in prompts and rid not in aborted
+                                   else " LEFTOVER" if rid not in prompts else " after-abort")
+                            trace.append((f"{step} out {rid} n={len(out.outputs[0].token_ids)}"
+                                          f"{' done' if out.finished else ''}{tag}", ""))
                         if rid in aborted or rid not in prompts:
                             continue  # aborted, or a leftover from an earlier run
                         outputs[rid] = list(out.outputs[0].token_ids)
                         if out.finished:
                             live.discard(rid)
                             finished.add(rid)
+                if self.tracing:
+                    sched = self._scheduler()
+                    if sched is not None:
+                        trace.append((f"{step} sched running={len(sched.running)} "
+                                      f"waiting={len(sched.waiting)}", ""))
+                    if xfer is not None:
+                        for tick, phase, kind, event, n, blocks in xfer.TRACE:
+                            trace.append((f"{step} {kind} {phase} n={n}",
+                                          f"event={event} src->dst={blocks}"))
+                        xfer.TRACE.clear()
             except Exception as e:  # vLLM itself failed (e.g. an internal assert)
                 import traceback
 
@@ -377,7 +447,8 @@ class VllmRunner:
         # Offload transfers still in flight: keep the engine stepping (with a
         # keep-alive request) until they complete, so none lands in the next run.
         if self.cfg.offload and engine_error is None and not live:
-            step, engine_error = self._drain_offload(seed, step, prompts, outputs, finished)
+            step, engine_error = self._drain_offload(seed, step, prompts, outputs, finished,
+                                                     trace if self.tracing else None)
 
         # Never leave requests behind: they would hold blocks (so the next
         # reset_prefix_cache fails) and emit outputs into the next run.
@@ -388,6 +459,8 @@ class VllmRunner:
             except Exception:
                 pass
 
+        if xfer is not None:
+            xfer.TRACE_ON = False
         mismatches = []
         for rid, got in sorted(outputs.items()):
             want = expected_continuation(list(prompts[rid]), len(got), self.vocab)
@@ -403,12 +476,12 @@ class VllmRunner:
         oafter = self.offload_stats()
         for k, v in oafter.items():
             metrics["offload_" + k] = v - obefore.get(k, 0)
-        if self.cfg.offload:
-            metrics["offload_resets_refused"] = 0 if reset_ok else 1
+        if not reset_ok:
+            self.resets_refused += 1  # this run was not isolated from the previous one
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,
-                          metrics=metrics, engine_error=engine_error)
+                          metrics=metrics, engine_error=engine_error, trace=trace)
 
 
 # ------------------------------------------------------------------ shrinking

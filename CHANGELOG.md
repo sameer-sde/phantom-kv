@@ -9,6 +9,11 @@ details are in the [devlog](docs/DEVLOG.md).
   unmodified, only the CUDA copy engine is replaced. Six `vllm-fuzz`
   profiles (`cpu-offload*`); 0 violations so far, 3,753 blocks stored and
   317 loaded back and verified.
+- Offload copy engine with separate load/store queues (like vLLM's two CUDA
+  streams); planted `store-reported-early` caught; offloading in CI.
+- `phantomkv vllm-diff`: run a seed twice, show the first step where the
+  runs differ. Found that the harness stopped stepping while vLLM still had
+  pending connector work; fixed.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
