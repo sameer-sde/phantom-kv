@@ -106,11 +106,22 @@ def pd_workload(seed: int, cfg: PdConfig) -> PdScenario:
 # ------------------------------------------------------------------ vLLM side
 def _quiet_connector_logs() -> None:
     """ExampleConnector logs a line per load and warns on every step without a
-    forward pass; across a campaign that buries the results."""
+    forward pass; across a campaign that buries the results. Errors still show."""
     import logging
 
-    logging.getLogger("vllm.distributed.kv_transfer.kv_connector.v1.example_connector") \
-        .setLevel(logging.ERROR)
+    log = logging.getLogger("vllm.distributed.kv_transfer.kv_connector.v1.example_connector")
+    log.setLevel(logging.ERROR)
+    # a filter too: logging.config.dictConfig resets child loggers' levels but
+    # keeps their filters
+    if not any(isinstance(f, _BelowError) for f in log.filters):
+        log.addFilter(_BelowError())
+
+
+class _BelowError:
+    def filter(self, record) -> bool:  # logging.Filter protocol
+        import logging
+
+        return record.levelno >= logging.ERROR
 
 
 def build_pd_llm(cfg: PdConfig, storage: str, asynchronous: bool):
@@ -118,8 +129,7 @@ def build_pd_llm(cfg: PdConfig, storage: str, asynchronous: bool):
     from vllm.config import KVTransferConfig
 
     _quiet_connector_logs()
-
-    return LLM(
+    llm = LLM(
         model="facebook/opt-125m",
         hf_overrides={"architectures": ["PhantomForCausalLM"]},
         load_format="dummy",
@@ -141,6 +151,10 @@ def build_pd_llm(cfg: PdConfig, storage: str, asynchronous: bool):
             kv_connector_extra_config={"shared_storage_path": storage},
         ),
     )
+    # after the engine is built: vLLM (re)configures its loggers during start-up,
+    # which resets levels set earlier
+    _quiet_connector_logs()
+    return llm
 
 
 def _pool_marker(cfg: PdConfig) -> dict:
