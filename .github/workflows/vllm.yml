@@ -40,6 +40,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Runner CPU (the vLLM CPU wheel needs AVX-512; GitHub runners vary)
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          if grep -qw avx512f /proc/cpuinfo; then
+            echo "AVX-512: yes"
+          else
+            echo "::warning::This runner's CPU has no AVX-512. The vLLM CPU wheel may die with 'Illegal instruction'; that is the runner, not Phantom. Re-run the job."
+          fi
+
       - name: Install vLLM (pinned CPU wheel)
         run: |
           uv venv --python 3.12 .venv

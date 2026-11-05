@@ -3,6 +3,13 @@
 Each release marks a finished phase of the [roadmap](docs/ROADMAP.md). Day-by-day
 details are in the [devlog](docs/DEVLOG.md).
 
+## Unreleased (Phase 5: bug hunting)
+
+- vLLM's `SimpleCPUOffloadConnector` on the CPU backend: its manager runs
+  unmodified, only the CUDA copy engine is replaced. Six `vllm-fuzz`
+  profiles (`cpu-offload*`); 0 violations so far, 3,753 blocks stored and
+  317 loaded back and verified.
+
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
 - Two real vLLM engines (prefill + decode) exchanging KV through vLLM's
