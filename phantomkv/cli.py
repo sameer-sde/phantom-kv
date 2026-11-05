@@ -79,7 +79,7 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
           f"profile={a.profile} plant={a.plant or 'none'}")
     t1, failing, kinds, reqs = time.perf_counter(), [], {}, 0
     totals: dict[str, float] = {}
-    ran = 0
+    ran = nondeterministic = 0
     for seed in range(a.start, a.start + a.seeds):
         if runner.poisoned:
             print(f"vLLM raised an exception ({runner.poisoned}); its state can no longer "
@@ -93,10 +93,15 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 totals[k] = max(totals.get(k, 0), val)
             else:
                 totals[k] = totals.get(k, 0) + val
-        if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
-            print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
-            failing.append(res)
-            continue
+        if a.check_determinism:
+            again = runner.run(seed)
+            if again.fingerprint != res.fingerprint:
+                print(f"seed {seed}: NONDETERMINISTIC (two runs differ: steps "
+                      f"{res.steps} vs {again.steps}, outputs "
+                      f"{'same' if again.outputs == res.outputs else 'differ'})")
+                nondeterministic += 1
+                failing.append(res)
+                continue
         if not res.ok:
             failing.append(res)
             for k, n in res.kinds.items():
@@ -133,6 +138,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
     if first.engine_error:
         print("   engine error:", first.engine_error)
     # exit 1: Phantom found violations; exit 2: only vLLM's own exceptions fired
+    if not phantom_found and nondeterministic:
+        print(f"verdict: {nondeterministic} seeds gave different results on a replay "
+              "(no Phantom violation)")
+        return 1
     if not phantom_found:
         print("verdict: no Phantom violation; vLLM raised its own exception first")
         return 2
