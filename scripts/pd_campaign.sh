@@ -20,7 +20,7 @@ for mode in $MODES; do
     plant:*) args=(--plant "${mode#plant:}") ;;
     fault:*) args=(--fault "${mode#fault:}") ;;
   esac
-  python -m phantomkv pd-fuzz --seeds "$SEEDS" "${args[@]}" >"$log" 2>&1
+  python -m phantomkv pd-fuzz --seeds "$SEEDS" -v "${args[@]}" >"$log" 2>&1
   code=$?
   failing=$(grep -oE "^[0-9]+ failing seeds" "$log" | grep -oE "^[0-9]+" || echo 0)
   evidence=$(grep -E "^evidence:" "$log" | sed 's/^evidence: //; s/async loads //')
@@ -35,4 +35,8 @@ for mode in $MODES; do
   grep -q "never fired\|was not exercised" "$log" && verdict="$verdict(!)"  # see the log
   label=$([ "$mode" = clean ] && echo unmodified || echo "$mode")
   printf "%-26s %-10s %-14s %s\n" "$label" "$verdict" "${failing}/${SEEDS}" "$evidence"
+  if [ "$mode" != clean ]; then  # seeds the bug or fault did not break: worth a look
+    missed=$(grep -E "^seed [0-9]+: .* -> clean$" "$log" | grep -oE "^seed [0-9]+" | cut -d' ' -f2 | head -12 | tr '\n' ' ')
+    [ -n "$missed" ] && printf "%-26s %s\n" "" "not caught: seeds ${missed}(per-seed lines in $log)"
+  fi
 done

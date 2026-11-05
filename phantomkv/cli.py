@@ -199,7 +199,9 @@ def _pd_fuzz(a: argparse.Namespace) -> int:
             m = res.metrics
             print(f"seed {seed}: delay={m['delay']} loads={m['loads_started']} "
                   f"aborts={m['aborts']} (in flight {m['aborts_in_flight']}) "
-                  f"-> {res.kinds or 'clean'}")
+                  f"transferred_tokens={m['transferred_tokens']}"
+                  + (f" faults={m['faults_injected']}" if a.fault else "")
+                  + f" -> {res.kinds or 'clean'}")
         if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
             print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
             failing.append(res)
