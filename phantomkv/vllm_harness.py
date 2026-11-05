@@ -81,8 +81,8 @@ PROFILES: dict[str, dict] = {
     "cpu-offload-lazy": {"offload": "lazy"},
     # transfers take 2 steps: blocks the manager releases early get overwritten
     "cpu-offload-slow": {"offload": "eager", "offload_delay": 2},
-    # small CPU cache: CPU-side LRU eviction under pressure
-    "cpu-offload-small": {"offload": "eager", "offload_cpu_blocks": 24},
+    # small GPU and CPU caches: CPU-side LRU eviction, and preemption flushes
+    "cpu-offload-small": {"offload": "eager", "kv_blocks": 32, "offload_cpu_blocks": 32},
 }
 
 
@@ -312,7 +312,9 @@ class VllmRunner:
         from vllm.inputs import TokensPrompt
 
         events = vllm_workload(seed, self.cfg) if events is None else events
-        self.engine.reset_prefix_cache()
+        # with CPU offloading, the connector's CPU cache must be reset too, or a
+        # replay of the same seed finds blocks the first run stored
+        reset_ok = self.engine.reset_prefix_cache(reset_connector=bool(self.cfg.offload))
         offset = self._report_offset()
         before = self.counters()
         mbefore = self.model_stats()
@@ -396,6 +398,8 @@ class VllmRunner:
         oafter = self.offload_stats()
         for k, v in oafter.items():
             metrics["offload_" + k] = v - obefore.get(k, 0)
+        if self.cfg.offload:
+            metrics["offload_resets_refused"] = 0 if reset_ok else 1
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,
