@@ -81,8 +81,13 @@ PROFILES: dict[str, dict] = {
     "cpu-offload-lazy": {"offload": "lazy"},
     # transfers take 2 steps: blocks the manager releases early get overwritten
     "cpu-offload-slow": {"offload": "eager", "offload_delay": 2},
-    # small GPU and CPU caches: CPU-side LRU eviction, and preemption flushes
+    # small GPU and CPU caches: CPU-side LRU eviction
     "cpu-offload-small": {"offload": "eager", "kv_blocks": 32, "offload_cpu_blocks": 32},
+    # transfers take 25 steps: still in flight when their requests finish and
+    # the revisit wave arrives
+    "cpu-offload-very-slow": {"offload": "eager", "offload_delay": 25},
+    # more sequences than the GPU cache holds: preemption flushes (need_flush)
+    "cpu-offload-preempt": {"offload": "eager", "kv_blocks": 24, "max_num_seqs": 8},
 }
 
 

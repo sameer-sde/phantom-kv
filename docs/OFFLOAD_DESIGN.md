@@ -63,7 +63,9 @@ decisions traced by hand).
 | `cpu-offload` | eager stores, loads of evicted prefixes (revisit wave) |
 | `cpu-offload-lazy` | lazy stores: the GPU free-queue cursor |
 | `cpu-offload-slow` | transfers take 2 steps: early release of GPU or CPU blocks |
-| `cpu-offload-small` | 32 GPU + 32 CPU blocks: CPU-side LRU eviction, preemption flushes |
+| `cpu-offload-small` | 32 GPU + 32 CPU blocks: CPU-side LRU eviction |
+| `cpu-offload-very-slow` | transfers take 25 steps: still in flight when their requests finish and the revisit wave arrives |
+| `cpu-offload-preempt` | 24 GPU blocks, 8 sequences: preemption while transfers are in flight (`need_flush`) |
 
 Evidence per campaign: store events / blocks stored, load events / blocks
 loaded back, flushes. A campaign that never loads a block back did not test
@@ -71,8 +73,8 @@ the load path, and says so.
 
 ## Validation (planted, in our copy engine)
 
-`PHANTOM_OFFLOAD_FAULT=store-reported-early` (with `cpu-offload-slow`): a
-store is reported complete when it is issued, but the copy still runs two
+`PHANTOM_OFFLOAD_FAULT=store-reported-early` (with `cpu-offload-very-slow`): a
+store is reported complete when it is issued, but the copy still runs 25
 steps later. The manager, trusting the report, releases the GPU blocks and
 publishes the CPU blocks: a GPU block reused in between is copied with the
 wrong contents, and a load can read a CPU block before anything is in it.
