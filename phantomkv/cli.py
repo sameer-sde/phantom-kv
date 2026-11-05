@@ -121,6 +121,9 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         if any(k.startswith("offload_") for k in totals):
             print("cpu offload: " + " ".join(f"{k[len('offload_'):]}={int(v)}"
                                              for k, v in totals.items() if k.startswith("offload_")))
+            if runner.resets_refused:
+                print(f"warning: vLLM refused {runner.resets_refused} cache resets; those runs "
+                      "started with the previous run's cache, so replays can differ")
             if not totals.get("offload_blocks_loaded"):
                 print("warning: no block was loaded back from the CPU cache; "
                       "the offload load path was not exercised")

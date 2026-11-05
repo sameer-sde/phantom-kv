@@ -191,6 +191,7 @@ class VllmRunner:
                 os.remove(path)
         self.poisoned: str | None = None  # set once vLLM raises: its state can't be trusted
         self.tracing = False  # set by `phantomkv vllm-diff`
+        self.resets_refused = 0  # runs that started without a clean cache
         os.environ["PHANTOM_REPORT"] = self.report
         # Run vLLM's EngineCore in THIS process. With the default multiprocess
         # engine, the core runs its own busy loop: add/abort messages arrive
@@ -297,6 +298,10 @@ class VllmRunner:
 
     KEEPALIVE_RID = 99_999
 
+    def _engine_busy(self) -> bool:
+        sched = self._scheduler()
+        return bool(sched is not None and sched.has_requests())
+
     def _scheduler(self):
         """vLLM's scheduler (in-process engine only), for tracing."""
         core = getattr(getattr(self.engine, "engine_core", None), "engine_core", None)
@@ -381,7 +386,7 @@ class VllmRunner:
 
                 xfer.TRACE_ON = True
                 xfer.TRACE.clear()
-        while step <= last_event_step or live:
+        while step <= last_event_step or live or self._engine_busy():
             try:
                 for ev in by_step.get(step, ()):
                     if self.tracing and (ev.kind == "submit" or ev.rid in live):
@@ -399,8 +404,10 @@ class VllmRunner:
                         live.discard(ev.rid)
                         aborted.add(ev.rid)
                 # In-process engine: step() runs exactly one scheduler + model
-                # step, so only step while requests are live.
-                if live:
+                # step. Step while requests are live, and while vLLM itself says
+                # it has work (scheduler.has_requests(): e.g. a connector's
+                # pending stores), as vLLM's own engine loop does.
+                if live or self._engine_busy():
                     for out in self.engine.step():
                         rid = int(str(out.request_id).split("-")[0])
                         if self.tracing:
@@ -469,8 +476,8 @@ class VllmRunner:
         oafter = self.offload_stats()
         for k, v in oafter.items():
             metrics["offload_" + k] = v - obefore.get(k, 0)
-        if self.cfg.offload:
-            metrics["offload_resets_refused"] = 0 if reset_ok else 1
+        if not reset_ok:
+            self.resets_refused += 1  # this run was not isolated from the previous one
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,
