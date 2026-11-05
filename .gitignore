@@ -12,3 +12,6 @@ pd_storage/
 pd_prompts.json
 phantom_report_*.jsonl*
 pd_faults.jsonl
+pd_fuzz_storage/
+pd_fuzz_events.jsonl
+phantom_pd_report.jsonl*
