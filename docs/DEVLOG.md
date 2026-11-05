@@ -566,3 +566,61 @@ got clean blocks. `context_not_computed_here: 320` = the 4 completed transfers
 - Seeded PD fuzzing: random abort timing, delays and fillers across many seeds,
   plus shrinking, so the two-engine path gets the same treatment as the
   single-engine one.
+
+## Day 15 — 2026-11-05
+
+**Built**
+- `phantomkv/vllm_pd.py`: seeded fuzzing of disaggregated prefill/decode on
+  real vLLM. A pool of 16 prompts is prefilled once by a separate engine and
+  reused. Each seed picks the async load delay (1-5 engine steps), which pool
+  prompts to transfer and when, which to abort (before the load starts, while
+  KV is in flight, after it lands) and when local fillers arrive to take freed
+  blocks. One in-process decode engine runs seed after seed and never saves KV,
+  so a replay of a seed sees exactly the same remote hits.
+- Every abort is classified from the connector's start/landing log, so a
+  campaign reports how many aborts really happened while KV was in flight.
+- `phantomkv pd-fuzz` and `phantomkv pd-shrink` (ddmin over the events, load
+  delay held fixed). Both PD fuzz runs added to the `real-vllm` CI job.
+- Day 14's async connector: delay read per load, load starts logged, swap and
+  silent-drop faults also apply to async loads.
+- First pull-request day: work lands on a branch through PR #2; releases
+  v0.1.0-v0.4.0 published for the finished phases (PR #1).
+
+**Results** (20 seeds, same scenarios in both runs)
+
+| Run | Seeds failing | Evidence |
+|---|---|---|
+| unmodified vLLM, every seed run twice | **0/20**, all deterministic | 137 async loads started and landed, 94 aborts, **35 while KV was in flight** |
+| `abort-free-race` planted | **14/20 caught** | 93 `misplaced-block`, 18 `chain-break`, 19 wrong outputs |
+
+The 6 seeds the plant did not break: seeds 2, 3 and 8 had no abort while KV
+was in flight (the bug cannot fire); in seeds 1, 4 and 11 the freed blocks
+were not reused before the late KV landed (the bug fired harmlessly). No
+seed without an in-flight abort was flagged.
+
+**Shrinking** seed 0 (delay 4): 24 events -> **2** in 36 vLLM runs (0.4 s),
+reproduces 3/3:
+
+```
+step 3  submit req 1  prompt_len=130  TRANSFERRED (KV from prefill engine)
+step 4  abort  req 1
+-> misplaced-block: slot 416 holds position 96   (the next request's position 0)
+```
+
+One transferred request, aborted one step after its load started. The next
+request (here the harness's keep-alive) is given the freed blocks, and the
+late KV lands on top of it. That is the whole bug in two events.
+
+**Mistakes I made and fixed**
+- Quieting vLLM's connector logs by setting the logger level did nothing:
+  vLLM's start-up runs `logging.config.dictConfig`, which resets child
+  loggers to `NOTSET`. A logger filter survives that (checked with
+  `dictConfig` directly).
+- The transferred-token count read 480 for 20 seeds, far too low. The model's
+  `context_not_computed_here` stat keys requests by their first block id,
+  which a long-lived engine reuses across seeds. The PD runner now counts
+  tokens from the connector's landing log instead.
+
+**Next (Day 16)**
+- Longer PD campaigns (hundreds of seeds), the swap and silent-drop faults
+  under fuzzing, and the Phase 4 wrap-up (release v0.5.0).

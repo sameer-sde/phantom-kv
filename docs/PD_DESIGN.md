@@ -69,4 +69,5 @@ correct handling in vLLM is checked (Phantom must stay silent).
 | 12 | Phantom through `maybe_transfer_kv_layer`; `scripts/vllm_pd_check.py` | ✅ 864 transferred positions (exactly the connector's expected count) verified, 12,624 slot reads, 0 violations, all outputs match |
 | 13 | `PhantomFaultConnector` with swap + silent-drop | ✅ swap: 4/4 swapped requests caught (wrong outputs); silent-drop: 96 unwritten-read violations; both in CI |
 | 14 | delay + abort mid-transfer | ✅ unmodified vLLM clean (4 late landings handled); `abort-free-race` planted: 54 violations, 5 fillers corrupted; both in CI |
-| 15-16 | seeded PD fuzzing + shrinking across both engines | `phantomkv pd-fuzz` |
+| 15 | seeded PD fuzzing + shrinking across both engines | ✅ `phantomkv pd-fuzz`: unmodified vLLM 0/20 (35 in-flight aborts, deterministic); `abort-free-race` 14/20 caught; seed 0 shrinks 24 -> 2 events; both in CI |
+| 16 | longer campaigns, transfer faults under fuzzing, Phase 4 wrap-up | release v0.5.0 |
