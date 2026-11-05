@@ -1,4 +1,5 @@
-"""Command line:  python -m phantomkv fuzz | replay | shrink | vllm-fuzz | vllm-shrink"""
+"""Command line:  python -m phantomkv fuzz | replay | shrink | vllm-fuzz | vllm-shrink |
+                                    pd-fuzz | pd-shrink"""
 
 from __future__ import annotations
 
@@ -162,6 +163,111 @@ def _vllm_shrink(a: argparse.Namespace) -> int:
     return 1
 
 
+def _pd_config(a: argparse.Namespace):
+    from .vllm_pd import PdConfig
+
+    return PdConfig(pool_size=a.pool)
+
+
+def _pd_prefill(a: argparse.Namespace) -> int:
+    from .vllm_pd import run_prefill  # internal: the prefill engine's own process
+
+    return run_prefill(_pd_config(a), a.storage)
+
+
+def _pd_fuzz(a: argparse.Namespace) -> int:
+    from .vllm_pd import PdRunner  # needs the vLLM environment
+
+    t0 = time.perf_counter()
+    runner = PdRunner(_pd_config(a), storage=a.storage, fault=a.fault, plant=a.plant)
+    print(f"engines ready in {time.perf_counter() - t0:.1f}s "
+          f"(pool {'prefilled now' if runner.prefilled else 'reused'})  "
+          f"fault={a.fault or 'none'} plant={a.plant or 'none'}")
+    t1, failing, kinds, ran = time.perf_counter(), [], {}, 0
+    totals: dict[str, float] = {}
+    for seed in range(a.start, a.start + a.seeds):
+        if runner.poisoned:
+            print(f"vLLM raised an exception ({runner.poisoned}); its state can no longer "
+                  f"be trusted, so seeds {seed}..{a.start + a.seeds - 1} were skipped")
+            break
+        res = runner.run(seed)
+        ran += 1
+        for k, val in res.metrics.items():
+            if k != "delay":
+                totals[k] = totals.get(k, 0) + val
+        if a.verbose:
+            m = res.metrics
+            print(f"seed {seed}: delay={m['delay']} loads={m['loads_started']} "
+                  f"aborts={m['aborts']} (in flight {m['aborts_in_flight']}) "
+                  f"-> {res.kinds or 'clean'}")
+        if a.check_determinism and runner.run(seed).fingerprint != res.fingerprint:
+            print(f"seed {seed}: NONDETERMINISTIC (two runs differ)")
+            failing.append(res)
+            continue
+        if not res.ok:
+            failing.append(res)
+            for k, n in res.kinds.items():
+                kinds[k] = kinds.get(k, 0) + n
+    dt = time.perf_counter() - t1
+    print(f"phantomkv pd: {ran} seeds in {dt:.1f}s")
+    print(f"evidence: async loads started={int(totals.get('loads_started', 0))} "
+          f"landed={int(totals.get('loads_landed', 0))} "
+          f"aborts={int(totals.get('aborts', 0))} "
+          f"aborts_while_kv_in_flight={int(totals.get('aborts_in_flight', 0))} "
+          f"transferred_tokens_read={int(totals.get('transferred_tokens', 0))}")
+    if not totals.get("aborts_in_flight"):
+        print("warning: no abort happened while KV was in flight; the race was not exercised")
+    if not failing:
+        print("no violations found")
+        return 0
+    first = failing[0]
+    print(f"{len(failing)} failing seeds; kinds: {kinds}")
+    print(f"first failure: seed {first.seed} (delay {first.metrics.get('delay')}): {first.kinds}")
+    for v in first.violations[:3]:
+        print("  ", v)
+    for m in first.mismatches[:3]:
+        print("  ", m)
+    if first.engine_error:
+        print("   engine error:", first.engine_error)
+    extra = "".join(f" --{k} {v}" for k, v in (("fault", a.fault), ("plant", a.plant)) if v)
+    print(f"shrink with:  python -m phantomkv pd-shrink --seed {first.seed}{extra}")
+    if not any(r.violations or r.mismatches or r.liveness for r in failing):
+        print("verdict: no Phantom violation; vLLM raised its own exception first")
+        return 2
+    return 1
+
+
+def _pd_shrink(a: argparse.Namespace) -> int:
+    from .vllm_pd import PdRunner, pd_shrink  # needs the vLLM environment
+
+    t0 = time.perf_counter()
+    runner = PdRunner(_pd_config(a), storage=a.storage, fault=a.fault, plant=a.plant)
+    print(f"engines ready in {time.perf_counter() - t0:.1f}s  "
+          f"fault={a.fault or 'none'} plant={a.plant or 'none'}")
+    t1 = time.perf_counter()
+    res = pd_shrink(runner, a.seed)
+    if res is None:
+        print(f"seed {a.seed} passes; nothing to shrink")
+        return 0
+    print(f"shrunk seed {a.seed} (load delay {res.delay} steps): {len(res.original)} events "
+          f"-> {len(res.minimal)} ({res.runs} vLLM runs, {time.perf_counter() - t1:.1f}s), "
+          f"kind={res.kind}")
+    print(f"reproduces {res.reproduced}/{res.confirm} times on fresh re-runs\n")
+    print("minimal reproduction:")
+    for ev in sorted(res.minimal, key=lambda e: (e.time, e.kind != "submit", e.rid)):
+        line = f"  step {ev.time:<4} {ev.kind:<6} req {ev.rid:<3}"
+        if ev.kind == "submit":
+            src = "TRANSFERRED (KV from prefill engine)" if ev.remote else "local filler"
+            line += f" prompt_len={len(ev.prompt):<4} max_new={ev.max_new:<3} {src}"
+        print(line)
+    print("\nviolations in the minimal run:")
+    for v in res.result.violations[:5]:
+        print("  ", v)
+    for m in res.result.mismatches[:5]:
+        print("  ", m)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="phantomkv",
                                 description="Deterministic simulation testing for LLM serving KV caches")
@@ -204,6 +310,33 @@ def main(argv: list[str] | None = None) -> int:
     vs.add_argument("--plant", default=None, help="plant a known bug into vLLM")
     vs.add_argument("--profile", default="baseline")
     vs.set_defaults(fn=_vllm_shrink)
+
+    def pd_common(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--fault", choices=["swap", "silent-drop"], default=None,
+                        help="plant a transfer fault in the decode engine's connector")
+        sp.add_argument("--plant", default=None,
+                        help="plant a vLLM scheduler bug in the decode engine (e.g. abort-free-race)")
+        sp.add_argument("--pool", type=int, default=16, help="prompts prefilled once and reused")
+        sp.add_argument("--storage", default="pd_fuzz_storage",
+                        help="shared KV storage between the two engines")
+
+    pf = sub.add_parser("pd-fuzz", help="seeded fuzzing of two-engine prefill/decode on real vLLM")
+    pf.add_argument("--seeds", type=int, default=20)
+    pf.add_argument("--start", type=int, default=0)
+    pf.add_argument("--check-determinism", action="store_true",
+                    help="run every seed twice and require identical results")
+    pf.add_argument("-v", "--verbose", action="store_true")
+    pd_common(pf)
+    pf.set_defaults(fn=_pd_fuzz)
+
+    ps = sub.add_parser("pd-shrink", help="minimise a failing two-engine seed")
+    ps.add_argument("--seed", type=int, required=True)
+    pd_common(ps)
+    ps.set_defaults(fn=_pd_shrink)
+
+    pp = sub.add_parser("pd-prefill")  # internal: run by pd-fuzz in its own process
+    pd_common(pp)
+    pp.set_defaults(fn=_pd_prefill)
 
     a = p.parse_args(argv)
     return a.fn(a)

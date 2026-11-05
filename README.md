@@ -4,7 +4,7 @@
 [![real-vllm](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-24%20passing-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-28%20passing-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
@@ -404,6 +404,30 @@ DECODE VIOLATIONS: 54
 RESULT: CAUGHT
 ```
 
+**Seeded two-engine fuzzing.** `phantomkv pd-fuzz` turns this into a search:
+each seed picks the load delay (1-5 steps), which prefilled prompts to
+transfer and when, which to abort (before the load starts, while KV is in
+flight, after it lands) and when local requests arrive to take freed blocks.
+Every abort is classified from the connector's log, so a campaign proves the
+race was actually exercised.
+
+| 20 seeds | Failing | Evidence |
+|---|---|---|
+| unmodified vLLM (each seed run twice) | **0**, deterministic | 137 async loads, 94 aborts, **35 while KV was in flight** |
+| `abort-free-race` planted | **14 caught** | 93 `misplaced-block`, 18 `chain-break`, 19 wrong outputs |
+
+A failing seed shrinks to the whole bug in two events:
+
+```
+$ python -m phantomkv pd-shrink --seed 0 --plant abort-free-race
+shrunk seed 0 (load delay 4 steps): 24 events -> 2 (36 vLLM runs, 0.4s), kind=misplaced-block
+reproduces 3/3 times on fresh re-runs
+
+  step 3    submit req 1   prompt_len=130  max_new=9   TRANSFERRED (KV from prefill engine)
+  step 4    abort  req 1
+   {'kind': 'misplaced-block', 'pos': 0, 'detail': 'slot 416 holds position 96'}
+```
+
 ```
 python scripts/vllm_pd_check.py --fault swap
 ```
@@ -500,7 +524,7 @@ CI runs on every push:
 | 1. Test-case shrinking: failing seed → minimal event trace | ✅ done |
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
-| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 two engines verified; swap, silent-drop and abort-mid-transfer (SGLang Oct-2026 class) caught, all in CI; seeded PD fuzzing next |
+| 4. Two-engine PD disaggregation with transfer faults (swap, drop, abort mid-transfer) | 🔄 two engines verified; swap, silent-drop and abort-mid-transfer (SGLang Oct-2026 class) caught; seeded PD fuzzing + shrinking (0/20 clean, 14/20 planted caught); all in CI |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
 
 Releases: [v0.1.0 – v0.4.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
@@ -525,11 +549,13 @@ phantom-kv/
 │   ├── vllm_plants.py     # known bug classes planted into vLLM at runtime
 │   ├── vllm_fault_connector.py # ExampleConnector + planted transfer faults
 │   ├── vllm_harness.py    # seeded step-by-step driver for real vLLM
+│   ├── vllm_pd.py         # seeded two-engine (prefill/decode) fuzzing + shrinking
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
 │   ├── test_shrink.py     # minimal, still-failing, 1-minimal reproductions
-│   └── test_tags.py       # tags round-trip exactly through float32
+│   ├── test_tags.py       # tags round-trip exactly through float32
+│   └── test_pd_workload.py # seeded PD scenarios: delays, abort timings, fillers
 ├── docs/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design

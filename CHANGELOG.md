@@ -15,6 +15,10 @@ details are in the [devlog](docs/DEVLOG.md).
   blocks are freed while its KV is still in flight. Unmodified vLLM stays clean
   (4 late landings handled); with the plant, 54 `misplaced-block` violations and
   5 corrupted requests.
+- Seeded PD fuzzing (`phantomkv pd-fuzz`, `pd-shrink`): each seed picks the
+  load delay, transfers, abort timings and fillers. Unmodified vLLM: 0/20
+  failing with 35 aborts while KV was in flight. `abort-free-race`: 14/20
+  caught; a failing seed shrinks from 24 events to 2.
 - All two-engine runs are part of the `real-vllm` CI job.
 
 ## v0.4.0 (Phase 3: more chaos on real vLLM)

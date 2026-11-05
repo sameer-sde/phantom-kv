@@ -49,4 +49,10 @@ expect pass "two engines, abort while KV in flight, unmodified vLLM: must stay c
 expect pass "two engines, abort while KV in flight, abort-free-race planted -> must be caught" \
   python scripts/vllm_pd_check.py --abort-mid-transfer --plant abort-free-race
 
+# Phase 4, seeded: random load delays, abort timings and fillers on two engines
+expect pass "PD fuzz x${SEEDS}, unmodified vLLM, each seed run twice" \
+  python -m phantomkv pd-fuzz --seeds "${SEEDS}" --check-determinism
+expect fail "PD fuzz x${SEEDS}, abort-free-race planted -> must be caught" \
+  python -m phantomkv pd-fuzz --seeds "${SEEDS}" --plant abort-free-race
+
 exit $fail
