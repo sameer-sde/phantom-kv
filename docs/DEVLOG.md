@@ -684,3 +684,66 @@ the NIXL metadata bug class, which needs the NIXL connector. Moved to Phase 5.
 **Next (Phase 5)**
 - Point Phantom at code nobody planted bugs in: newer vLLM KV paths (CPU
   offloading, hybrid KV groups, deferred frees), then SGLang and LMCache.
+
+## Day 17 — 2026-11-05
+
+**Phase 5 starts: vLLM code nobody planted bugs in.** Target 1 is vLLM's
+`SimpleCPUOffloadConnector`, whose scheduler-side manager (~1,500 lines)
+decides which GPU blocks are copied to a CPU cache and which CPU blocks a
+request may load back. Design: [OFFLOAD_DESIGN.md](OFFLOAD_DESIGN.md).
+
+**Built**
+- The connector and its manager run unmodified on the CPU backend; only the
+  CUDA/DMA copy engine is replaced (`PhantomOffloadWorker`, installed by the
+  plugin), executing the same block lists with tensor copies.
+- Six `vllm-fuzz` profiles: `cpu-offload`, `-lazy`, `-slow` (2-step
+  transfers), `-small` (32 GPU + 32 CPU blocks), `-very-slow` (25-step
+  transfers), `-preempt` (8 sequences, 24 GPU blocks).
+- Evidence per campaign: blocks stored, blocks loaded back, flushes, resets
+  refused.
+
+**Results, unmodified vLLM** (10 seeds each, every seed run twice)
+
+| Profile | Result | Stored / loaded back | Other |
+|---|---|---|---|
+| cpu-offload | clean, deterministic | 616 / 31 | |
+| cpu-offload-lazy | clean, deterministic | 559 / 27 | |
+| cpu-offload-slow | clean, deterministic | 616 / 32 | |
+| cpu-offload-small | clean, deterministic | 696 / 14 | |
+| cpu-offload-preempt | clean, deterministic | 634 / 146 | 6 preemptions, 6 flushes |
+| cpu-offload-very-slow | **no violations, but 9/10 seeds differ on replay** | 632 / 67 | open lead |
+
+No Phantom violation and no wrong output anywhere: 3,753 blocks stored,
+317 loaded back and verified.
+
+**Mistakes and dead ends**
+- First run: every seed "nondeterministic". The harness reset only the GPU
+  prefix cache; `reset_prefix_cache(reset_connector=True)` also resets the
+  CPU cache. Fixed. The CLI then blamed "vLLM raised its own exception",
+  which was wrong; it now reports replay differences as such.
+- `cpu-offload-small` with 24 CPU blocks never loaded anything back: blocks
+  were evicted before the revisit wave. Retuned.
+- Planted fault 1, `store-before-compute` (the race vLLM's worker guards
+  against, #45704): fired 256 times, changed nothing. The manager only stores
+  blocks that were full before the step, and the CPU backend runs the
+  forward pass synchronously; that race needs overlapped GPU execution.
+- Planted fault 2, `store-reported-early`: fired 256 (2-step) and 283
+  (25-step) times, still nothing caught. Reason found: my copy engine runs
+  loads and stores in **one** FIFO queue, so a load can never overtake the
+  store it depends on. vLLM's real worker uses **separate** load and store
+  streams, where it can. My copy engine was less adversarial than the
+  hardware it replaces.
+
+**Open lead: cpu-offload-very-slow replays differ.** Outputs stay correct
+(no mismatch against the reference), but a seed's first run takes ~70 more
+steps than its replay (e.g. 225 vs 157), on 9 of 10 seeds, with every reset
+accepted. The first run of seed k follows a different seed; its replay
+follows itself. Either state survives `reset_prefix_cache(reset_connector=True)`
+when transfers are slow, or my copy engine carries something across runs.
+Not a finding until that is settled.
+
+**Next (Day 18)**
+- Separate load and store queues in the copy engine (like the real streams),
+  then re-validate the planted fault.
+- Trace both runs of a very-slow seed step by step and find the first
+  divergence.

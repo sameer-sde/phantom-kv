@@ -541,7 +541,7 @@ CI runs on every push:
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
-| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ⏳ |
+| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 6 profiles, 0 violations so far ([design](docs/OFFLOAD_DESIGN.md)); one replay-difference lead open |
 
 Releases: [v0.1.0 – v0.5.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
 
@@ -566,6 +566,7 @@ phantom-kv/
 │   ├── vllm_fault_connector.py # ExampleConnector + planted transfer faults
 │   ├── vllm_harness.py    # seeded step-by-step driver for real vLLM
 │   ├── vllm_pd.py         # seeded two-engine (prefill/decode) fuzzing + shrinking
+│   ├── vllm_offload.py    # vLLM's CPU KV offloading on the CPU backend (copy engine only replaced)
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
@@ -576,6 +577,7 @@ phantom-kv/
 │   ├── DESIGN.md          # oracle, determinism, mapping to vLLM
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
 │   ├── PD_DESIGN.md       # phase 4: disaggregated prefill/decode + fault plan
+│   ├── OFFLOAD_DESIGN.md  # phase 5 target 1: vLLM's CPU KV offloading
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
