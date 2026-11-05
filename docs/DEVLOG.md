@@ -747,3 +747,63 @@ Not a finding until that is settled.
   then re-validate the planted fault.
 - Trace both runs of a very-slow seed step by step and find the first
   divergence.
+
+## Day 18 — 2026-11-05
+
+Both Day 17 open items are closed. Neither was a vLLM bug; both were in my
+harness, and the tools built to find them stay useful.
+
+**Built**
+- The offload copy engine now has **separate load and store queues**, each
+  FIFO with its own delay, like vLLM's two CUDA streams. A load can now
+  complete before an earlier, slower store, which the single queue made
+  impossible. New profile `cpu-offload-slow-stores`: stores 40 steps,
+  loads 1.
+- Per-step run traces in the harness, and **`phantomkv vllm-diff`**: run a
+  seed twice and print the first step where the two runs differ.
+
+**Item 1: the planted offload fault is caught.** With separate queues,
+`store-reported-early` breaks 4/10 seeds (132 `misplaced-block`, 5 wrong
+outputs), e.g. `slot 1024 holds position 160`: a request loaded a CPU block
+whose store had been reported done but had not run yet. Unmodified vLLM,
+same profile: 0 violations.
+
+**Item 2: the replay difference was the harness.** `vllm-diff` showed it in
+the first trace line:
+
+```
+first run:  start [reset_prefix_cache -> True]
+replay:     start [reset_prefix_cache -> False]
+```
+
+Every replay started on the previous run's caches. vLLM refused the reset
+correctly: the offload manager still held blocks for stores it had not
+issued yet. vLLM's own engine loop keeps stepping while
+`scheduler.has_requests()` is true, which includes a connector's pending
+push work; my harness stopped as soon as no request was live, so those
+stores never went out. The harness now steps while `has_requests()` is
+true. My "resets refused" counter only looked at first runs, so it showed 0
+and hid this; it now counts every run.
+
+**After the fix** (10 seeds each, every seed run twice)
+
+| Profile | Result | Stored / loaded back |
+|---|---|---|
+| cpu-offload-very-slow | clean, deterministic (seed 0: identical step by step) | 614 / 67 |
+| cpu-offload-slow-stores | clean, deterministic | 612 / 61, 3 flushes |
+| cpu-offload | clean, deterministic | 616 / 31 |
+| baseline (no offload, regression) | clean, deterministic | - |
+| `store-reported-early` planted | **caught 4/10** | |
+
+CPU offloading (slow-stores, clean and planted) added to the `real-vllm` CI job.
+
+**Learned**
+- Two "mysteries" in a row were my own harness. A diff tool that shows the
+  first divergent step turned guessing into one line of evidence.
+- A substitute component has to be at least as adversarial as the real one
+  (two queues, not one), or the test proves less than it seems to.
+
+**Status of target 1:** vLLM's CPU offloading manager is clean under every
+profile tried, including slow stores, very slow transfers, preemption and
+small caches, with the harness now validated in both directions. No bug
+found here so far.

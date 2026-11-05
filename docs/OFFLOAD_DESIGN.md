@@ -66,6 +66,7 @@ decisions traced by hand).
 | `cpu-offload-small` | 32 GPU + 32 CPU blocks: CPU-side LRU eviction |
 | `cpu-offload-very-slow` | transfers take 25 steps: still in flight when their requests finish and the revisit wave arrives |
 | `cpu-offload-preempt` | 24 GPU blocks, 8 sequences: preemption while transfers are in flight (`need_flush`) |
+| `cpu-offload-slow-stores` | stores 40 steps, loads 1, on separate queues: a load can overtake a store (in CI) |
 
 Evidence per campaign: store events / blocks stored, load events / blocks
 loaded back, flushes. A campaign that never loads a block back did not test
@@ -73,9 +74,9 @@ the load path, and says so.
 
 ## Validation (planted, in our copy engine)
 
-`PHANTOM_OFFLOAD_FAULT=store-reported-early` (with `cpu-offload-very-slow`): a
-store is reported complete when it is issued, but the copy still runs 25
-steps later. The manager, trusting the report, releases the GPU blocks and
+`PHANTOM_OFFLOAD_FAULT=store-reported-early` (with `cpu-offload-slow-stores`):
+a store is reported complete when it is issued, but the copy still runs 40
+steps later. Caught on 4/10 seeds (Day 18), in CI. The manager, trusting the report, releases the GPU blocks and
 publishes the CPU blocks: a GPU block reused in between is copied with the
 wrong contents, and a load can read a CPU block before anything is in it.
 Must be caught; unmodified runs must stay clean.
@@ -92,4 +93,5 @@ execution, so it cannot be reproduced here.
 | Day | Milestone |
 |---|---|
 | 17 | offload running on the CPU backend; profiles; planted fault caught |
-| 18+ | campaigns across all four profiles; any violation on unmodified vLLM is minimised and traced to the manager line responsible |
+| 18 | ✅ separate load/store queues; planted fault caught 4/10; replay difference traced to the harness (`vllm-diff`) and fixed; offload in CI |
+| 19+ | longer campaigns; then the next target |
