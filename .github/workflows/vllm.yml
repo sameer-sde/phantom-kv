@@ -12,6 +12,12 @@ on:
       - "scripts/**"
       - ".github/workflows/vllm.yml"
       - "pyproject.toml"
+  pull_request:
+    paths:
+      - "phantomkv/**"
+      - "scripts/**"
+      - ".github/workflows/vllm.yml"
+      - "pyproject.toml"
   workflow_dispatch:
 
 env:
