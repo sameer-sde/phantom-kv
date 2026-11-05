@@ -54,5 +54,7 @@ expect pass "PD fuzz x${SEEDS}, unmodified vLLM, each seed run twice" \
   python -m phantomkv pd-fuzz --seeds "${SEEDS}" --check-determinism
 expect fail "PD fuzz x${SEEDS}, abort-free-race planted -> must be caught" \
   python -m phantomkv pd-fuzz --seeds "${SEEDS}" --plant abort-free-race
+expect fail "PD fuzz x${SEEDS}, duplicate transfer fault -> must be caught" \
+  python -m phantomkv pd-fuzz --seeds "${SEEDS}" --fault duplicate
 
 exit $fail
