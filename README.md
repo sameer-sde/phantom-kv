@@ -567,6 +567,8 @@ phantom-kv/
 │   ├── vllm_harness.py    # seeded step-by-step driver for real vLLM
 │   ├── vllm_pd.py         # seeded two-engine (prefill/decode) fuzzing + shrinking
 │   ├── vllm_offload.py    # vLLM's CPU KV offloading on the CPU backend (copy engine only replaced)
+│   ├── vllm_offload2.py   # vLLM's OffloadingConnector, via its pluggable OffloadingSpec
+│   ├── offload_map.py     # block <-> chunk mapping for offloaded KV
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
@@ -578,6 +580,7 @@ phantom-kv/
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
 │   ├── PD_DESIGN.md       # phase 4: disaggregated prefill/decode + fault plan
 │   ├── OFFLOAD_DESIGN.md  # phase 5 target 1: vLLM's CPU KV offloading
+│   ├── OFFLOAD2_DESIGN.md # phase 5 target 2: vLLM's OffloadingConnector
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
