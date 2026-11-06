@@ -64,6 +64,7 @@ class VllmConfig:
     # Phase 5 target 2 ("tiered": vLLM's OffloadingConnector): GPU blocks per
     # offloaded chunk
     offload_chunk_blocks: int = 1
+    offload_sync_budget: int = 0  # bytes per step of synchronous (expedited) loads
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -107,6 +108,9 @@ PROFILES: dict[str, dict] = {
                              "offload_load_delay": 1},
     "offload2-preempt": {"offload": "tiered", "kv_blocks": 24, "max_num_seqs": 8},
     "offload2-small": {"offload": "tiered", "kv_blocks": 32, "offload_cpu_blocks": 32},
+    # synchronous loads: a request whose KV fits the per-step budget loads and
+    # runs in the same step (expedited load + wait inside the step)
+    "offload2-sync": {"offload": "tiered", "offload_sync_budget": 1 << 20},
 }
 
 
@@ -278,6 +282,7 @@ class VllmRunner:
                     "spec_module_path": "phantomkv.vllm_offload2",
                     "cpu_bytes_to_use": self.cfg.offload_cpu_blocks * aligned,
                     "blocks_per_chunk": self.cfg.offload_chunk_blocks,
+                    "sync_load_budget_bytes": self.cfg.offload_sync_budget,
                 })
         elif self.cfg.offload:
             from vllm.config import KVTransferConfig
