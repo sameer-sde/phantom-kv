@@ -61,6 +61,10 @@ class VllmConfig:
     offload_delay: int = 0
     offload_store_delay: int | None = None  # per-direction overrides
     offload_load_delay: int | None = None
+    # Phase 5 target 2 ("tiered": vLLM's OffloadingConnector): GPU blocks per
+    # offloaded chunk
+    offload_chunk_blocks: int = 1
+    offload_sync_budget: int = 0  # bytes per step of synchronous (expedited) loads
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -95,6 +99,18 @@ PROFILES: dict[str, dict] = {
     # read a CPU block whose store has not completed
     "cpu-offload-slow-stores": {"offload": "eager", "offload_store_delay": 40,
                                 "offload_load_delay": 1},
+    # Phase 5 target 2: vLLM's OffloadingConnector (scheduler + CPUOffloadingManager
+    # unmodified; only the CUDA copy engine is replaced, see vllm_offload2.py)
+    "offload2": {"offload": "tiered"},
+    # chunks of 2 GPU blocks: partial first chunks, alignment
+    "offload2-chunk2": {"offload": "tiered", "offload_chunk_blocks": 2},
+    "offload2-slow-stores": {"offload": "tiered", "offload_store_delay": 40,
+                             "offload_load_delay": 1},
+    "offload2-preempt": {"offload": "tiered", "kv_blocks": 24, "max_num_seqs": 8},
+    "offload2-small": {"offload": "tiered", "kv_blocks": 32, "offload_cpu_blocks": 32},
+    # synchronous loads: a request whose KV fits the per-step budget loads and
+    # runs in the same step (expedited load + wait inside the step)
+    "offload2-sync": {"offload": "tiered", "offload_sync_budget": 1 << 20},
 }
 
 
@@ -205,7 +221,7 @@ class VllmRunner:
         else:
             os.environ.pop("PHANTOM_VLLM_PLANT", None)
         self.plant = plant
-        if self.cfg.offload:
+        if self.cfg.offload in ("eager", "lazy"):
             os.environ["PHANTOM_OFFLOAD"] = "1"  # plugin installs PhantomOffloadWorker
             os.environ["PHANTOM_OFFLOAD_DELAY"] = str(self.cfg.offload_delay)
             for kind in ("store", "load"):
@@ -216,6 +232,11 @@ class VllmRunner:
                     os.environ[f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY"] = str(val)
         else:
             os.environ.pop("PHANTOM_OFFLOAD", None)
+        if self.cfg.offload == "tiered":  # read by vllm_offload2.PhantomOffloadWorker
+            for kind in ("store", "load"):
+                val = getattr(self.cfg, f"offload_{kind}_delay")
+                os.environ[f"PHANTOM_OFFLOAD2_{kind.upper()}_DELAY"] = str(
+                    self.cfg.offload_delay if val is None else val)
 
         from vllm import LLM  # imported here: only available in the vLLM venv
 
@@ -244,7 +265,26 @@ class VllmRunner:
         if self.cfg.max_num_batched_tokens is not None:
             args.update(enable_chunked_prefill=True,
                         max_num_batched_tokens=self.cfg.max_num_batched_tokens)
-        if self.cfg.offload:
+        if self.cfg.offload == "tiered":
+            import mmap
+
+            from vllm.config import KVTransferConfig
+
+            # vLLM sizes the CPU cache from bytes: each chunk is rounded up to
+            # the OS page size, so ask for exactly offload_cpu_blocks chunks
+            chunk = self.cfg.offload_chunk_blocks * page_bytes(self.cfg.block_size)
+            aligned = -(-chunk // mmap.PAGESIZE) * mmap.PAGESIZE
+            args["kv_transfer_config"] = KVTransferConfig(
+                kv_connector="OffloadingConnector",  # vLLM's own, unmodified
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "spec_name": "PhantomCPUOffloadingSpec",
+                    "spec_module_path": "phantomkv.vllm_offload2",
+                    "cpu_bytes_to_use": self.cfg.offload_cpu_blocks * aligned,
+                    "blocks_per_chunk": self.cfg.offload_chunk_blocks,
+                    "sync_load_budget_bytes": self.cfg.offload_sync_budget,
+                })
+        elif self.cfg.offload:
             from vllm.config import KVTransferConfig
 
             args["kv_transfer_config"] = KVTransferConfig(
@@ -257,12 +297,18 @@ class VllmRunner:
                 })
         return args
 
+    def _xfer(self):
+        """The copy-engine module for this profile (STATS, TRACE, pending_transfers)."""
+        if self.cfg.offload == "tiered":
+            from . import vllm_offload2 as mod
+        else:
+            from . import vllm_offload as mod
+        return mod
+
     def offload_stats(self) -> dict[str, int]:
         if not self.cfg.offload:
             return {}
-        from .vllm_offload import STATS
-
-        return dict(STATS)
+        return dict(self._xfer().STATS)
 
     COUNTERS = ("vllm:num_preemptions", "vllm:prefix_cache_hits", "vllm:prefix_cache_queries")
 
@@ -315,7 +361,7 @@ class VllmRunner:
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
 
-        from .vllm_offload import pending_transfers
+        pending_transfers = self._xfer().pending_transfers
 
         for k in range(3):
             if not pending_transfers():
@@ -336,8 +382,7 @@ class VllmRunner:
                     self.poisoned = f"seed {seed}, drain: {type(e).__name__}: {e}"[:400]
                     return step, self.poisoned
                 if trace is not None:
-                    from . import vllm_offload as xfer
-
+                    xfer = self._xfer()
                     for tick, phase, kind, event, n, blocks in xfer.TRACE:
                         trace.append((f"{step} {kind} {phase} n={n}",
                                       f"event={event} src->dst={blocks}"))
@@ -382,8 +427,7 @@ class VllmRunner:
         if self.tracing:
             trace.append(("start", f"reset_prefix_cache -> {reset_ok}"))
             if self.cfg.offload:
-                from . import vllm_offload as xfer
-
+                xfer = self._xfer()
                 xfer.TRACE_ON = True
                 xfer.TRACE.clear()
         while step <= last_event_step or live or self._engine_busy():

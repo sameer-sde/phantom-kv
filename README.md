@@ -4,7 +4,7 @@
 [![real-vllm](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
-[![Tests](https://img.shields.io/badge/tests-32%20passing-success)](#testing)
+[![Tests](https://img.shields.io/badge/tests-36%20passing-success)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
@@ -541,7 +541,7 @@ CI runs on every push:
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
-| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted offload fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)); no bug found yet |
+| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)). Target 2: vLLM's OffloadingConnector, plugged in through its own spec API; 5 profiles clean, failed loads/stores recovered correctly, in CI ([design](docs/OFFLOAD2_DESIGN.md)). No bug found yet |
 
 Releases: [v0.1.0 – v0.5.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
 
@@ -567,6 +567,8 @@ phantom-kv/
 │   ├── vllm_harness.py    # seeded step-by-step driver for real vLLM
 │   ├── vllm_pd.py         # seeded two-engine (prefill/decode) fuzzing + shrinking
 │   ├── vllm_offload.py    # vLLM's CPU KV offloading on the CPU backend (copy engine only replaced)
+│   ├── vllm_offload2.py   # vLLM's OffloadingConnector, via its pluggable OffloadingSpec
+│   ├── offload_map.py     # block <-> chunk mapping for offloaded KV
 │   └── __main__.py        # python -m phantomkv
 ├── tests/
 │   ├── test_oracle.py     # no false positives · planted bugs caught · determinism
@@ -578,6 +580,7 @@ phantom-kv/
 │   ├── VLLM_INTEGRATION.md # phase 2: code map + PhantomForCausalLM design
 │   ├── PD_DESIGN.md       # phase 4: disaggregated prefill/decode + fault plan
 │   ├── OFFLOAD_DESIGN.md  # phase 5 target 1: vLLM's CPU KV offloading
+│   ├── OFFLOAD2_DESIGN.md # phase 5 target 2: vLLM's OffloadingConnector
 │   ├── ROADMAP.md         # phases and exit criteria
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/

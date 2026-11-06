@@ -65,4 +65,14 @@ expect fail "CPU offload x${SEEDS}, store-reported-early planted -> must be caug
   env PHANTOM_OFFLOAD_FAULT=store-reported-early \
   python -m phantomkv vllm-fuzz --profile cpu-offload-slow-stores --seeds "${SEEDS}"
 
+# Phase 5 target 2: vLLM's OffloadingConnector (manager unmodified, copy engine
+# plugged in through its OffloadingSpec); preemption + flushes, and the two
+# storage failures vLLM must recover from
+expect pass "OffloadingConnector x${SEEDS}, unmodified vLLM, preemption, each seed twice" \
+  python -m phantomkv vllm-fuzz --profile offload2-preempt --seeds "${SEEDS}" --check-determinism
+expect pass "OffloadingConnector x${SEEDS}, every 3rd load fails: vLLM must recover" \
+  env PHANTOM_OFFLOAD2_FAULT=load-fails python -m phantomkv vllm-fuzz --profile offload2 --seeds "${SEEDS}"
+expect pass "OffloadingConnector x${SEEDS}, every 3rd store fails: never served" \
+  env PHANTOM_OFFLOAD2_FAULT=store-fails python -m phantomkv vllm-fuzz --profile offload2 --seeds "${SEEDS}"
+
 exit $fail
