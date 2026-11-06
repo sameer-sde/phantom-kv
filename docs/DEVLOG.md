@@ -807,3 +807,51 @@ CPU offloading (slow-stores, clean and planted) added to the `real-vllm` CI job.
 profile tried, including slow stores, very slow transfers, preemption and
 small caches, with the harness now validated in both directions. No bug
 found here so far.
+
+## Day 19 — 2026-11-06
+
+**Phase 5, target 2: vLLM's `OffloadingConnector`.** vLLM's second, larger
+offloading system: a ~2,600-line scheduler plus `CPUOffloadingManager`,
+with chunks of several GPU blocks, synchronous loads, deferred stores, and
+transfer failures as part of its API. Design:
+[OFFLOAD2_DESIGN.md](OFFLOAD2_DESIGN.md).
+
+**Built**
+- `PhantomCPUOffloadingSpec`: vLLM's own `CPUOffloadingSpec` with one
+  override, `get_worker()`, returning a tensor-copy worker. Selected through
+  vLLM's out-of-tree spec mechanism, so **no vLLM code is patched** this time.
+- `phantomkv/offload_map.py`: the block-to-chunk mapping (including a partial
+  first chunk), pure Python, 4 unit tests.
+- Profiles `offload2`, `-chunk2`, `-slow-stores`, `-preempt`, `-small`,
+  `-sync`; faults `store-reported-early` (planted), `load-fails` and
+  `store-fails` (storage failures vLLM must recover from).
+
+**Results** (10 seeds each; clean profiles run every seed twice)
+
+| Run | Result | Evidence |
+|---|---|---|
+| offload2 | clean, deterministic | 515 blocks stored, 30 loaded back |
+| offload2-chunk2 | clean, deterministic | 486 stored, 12 loaded back (2 blocks per chunk) |
+| offload2-slow-stores | clean, deterministic | 42 flush waits |
+| offload2-preempt | clean, deterministic | 6 preemptions, 138 loaded back |
+| offload2-small | clean, deterministic | 568 stored, 34 loaded back |
+| `store-reported-early` planted | **caught 4/10** | 132 `misplaced-block`, 5 wrong outputs |
+| every 3rd **load fails** | **outputs correct** | 6 loads failed; vLLM recomputed |
+| every 3rd **store fails** | **outputs correct** | 70 stores failed; none served |
+
+Everything ran on the first attempt. The two failure runs matter most: they
+are failures real storage produces, not bugs we planted, and vLLM handled
+both correctly.
+
+**Gaps found in my own coverage**
+- `sync_loads=0` in every profile: vLLM only issues synchronous loads when
+  `sync_load_budget_bytes` is set. Added `offload2-sync` (results next day).
+- `offload2-chunk2` loaded only 12 blocks back: partial-chunk loads are
+  barely exercised. Needs a workload that revisits prefixes at odd block
+  offsets.
+- `pytest` is not installed in my Mac's vLLM venv (CI runs the unit tests).
+
+OffloadingConnector added to the `real-vllm` CI job: preemption with the
+determinism check, failed loads, failed stores.
+
+**Next (Day 20):** sync loads; a revisit workload for partial chunks.

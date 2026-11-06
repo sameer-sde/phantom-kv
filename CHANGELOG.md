@@ -14,6 +14,10 @@ details are in the [devlog](docs/DEVLOG.md).
 - `phantomkv vllm-diff`: run a seed twice, show the first step where the
   runs differ. Found that the harness stopped stepping while vLLM still had
   pending connector work; fixed.
+- vLLM's `OffloadingConnector` (target 2) through its pluggable
+  `OffloadingSpec`, no vLLM code patched: `offload2*` profiles, planted
+  `store-reported-early` caught, and storage failures (`load-fails`,
+  `store-fails`) recovered correctly by vLLM; in CI.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 

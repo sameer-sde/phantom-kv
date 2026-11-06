@@ -52,6 +52,7 @@ stream. The chunk mapping is pure Python and unit-tested
 | `offload2-slow-stores` | stores 40 steps, loads 1 |
 | `offload2-preempt` | 24 GPU blocks, 8 sequences: preemption flushes |
 | `offload2-small` | 32 GPU blocks, 32 CPU chunks: CPU-side eviction |
+| `offload2-sync` | 1 MiB per-step budget: synchronous (expedited) loads |
 
 ## Faults (`PHANTOM_OFFLOAD2_FAULT`)
 
@@ -65,3 +66,10 @@ stream. The chunk mapping is pure Python and unit-tested
 failures real storage can produce, and the API says vLLM handles them. A
 violation there, on unmodified vLLM, would be a real finding (after ruling
 out the copy engine).
+
+## Status
+
+| Day | Result |
+|---|---|
+| 19 | all five profiles clean and deterministic; planted fault caught 4/10; failed loads and failed stores handled correctly by vLLM; in CI |
+| 20 | synchronous loads; partial-chunk revisits |
