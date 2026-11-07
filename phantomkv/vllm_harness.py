@@ -111,6 +111,15 @@ PROFILES: dict[str, dict] = {
     # synchronous loads: a request whose KV fits the per-step budget loads and
     # runs in the same step (expedited load + wait inside the step)
     "offload2-sync": {"offload": "tiered", "offload_sync_budget": 1 << 20},
+    # partial chunks: fewer GPU blocks (more evictions) and 3x the revisits,
+    # which come back for a random number of whole blocks, so an odd number
+    # often ends part-way into a chunk
+    "offload2-chunk2-revisit": {"offload": "tiered", "offload_chunk_blocks": 2,
+                                "kv_blocks": 32, "revisit_requests": 30,
+                                "revisit_window": 60},
+    "offload2-chunk3-revisit": {"offload": "tiered", "offload_chunk_blocks": 3,
+                                "kv_blocks": 32, "revisit_requests": 30,
+                                "revisit_window": 60},
 }
 
 

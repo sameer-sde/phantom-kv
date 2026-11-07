@@ -58,6 +58,8 @@ STATS: dict[str, int] = {
     "load_jobs": 0, "blocks_loaded": 0, "loads_failed": 0, "sync_loads": 0,
     "store_jobs": 0, "blocks_stored": 0, "stores_failed": 0,
     "flush_waits": 0, "faults_injected": 0,
+    # transfers that start part-way into a chunk, or end part-way into one
+    "partial_chunk_loads": 0, "partial_chunk_stores": 0,
 }
 TRACE: list[tuple] = []
 TRACE_ON = False
@@ -167,6 +169,9 @@ class PhantomOffloadWorker(OffloadingWorker):
                         cpu[chunk, window] = gpu[gb, :page]  # read now, like DMA
             key = "blocks_loaded" if job.kind == "load" else "blocks_stored"
             STATS[key] += len(job.gpu_blocks)
+            end = job.first_index + len(job.gpu_blocks)
+            if self.bpc > 1 and (job.first_index % self.bpc or end % self.bpc):
+                STATS[f"partial_chunk_{job.kind}s"] += 1
         STATS["load_jobs" if job.kind == "load" else "store_jobs"] += 1
         if not job.reported:
             self._results.append(TransferResult(job.job_id, not job.fail))
