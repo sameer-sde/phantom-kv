@@ -18,6 +18,9 @@ details are in the [devlog](docs/DEVLOG.md).
   `OffloadingSpec`, no vLLM code patched: `offload2*` profiles, planted
   `store-reported-early` caught, and storage failures (`load-fails`,
   `store-fails`) recovered correctly by vLLM; in CI.
+- Partial-chunk evidence, revisit-heavy chunk profiles and
+  `scripts/offload_campaign.sh`: 50 seeds per run, 8 profiles clean, planted
+  fault caught 24/50, storage failures recovered. README Phase 5 section.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
