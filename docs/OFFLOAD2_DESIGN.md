@@ -53,6 +53,7 @@ stream. The chunk mapping is pure Python and unit-tested
 | `offload2-preempt` | 24 GPU blocks, 8 sequences: preemption flushes |
 | `offload2-small` | 32 GPU blocks, 32 CPU chunks: CPU-side eviction |
 | `offload2-sync` | 1 MiB per-step budget: synchronous (expedited) loads |
+| `offload2-chunk2-revisit`, `-chunk3-revisit` | fewer GPU blocks, 3x revisits: partial-chunk loads |
 
 ## Faults (`PHANTOM_OFFLOAD2_FAULT`)
 
@@ -72,4 +73,4 @@ out the copy engine).
 | Day | Result |
 |---|---|
 | 19 | all five profiles clean and deterministic; planted fault caught 4/10; failed loads and failed stores handled correctly by vLLM; in CI |
-| 20 | synchronous loads; partial-chunk revisits |
+| 20 | 50-seed campaign: 8 profiles PASS (96 sync loads, 56 partial-chunk loads), planted fault CAUGHT 24/50, failed loads and stores RECOVERED; no bug found |

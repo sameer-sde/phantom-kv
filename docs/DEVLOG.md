@@ -855,3 +855,50 @@ OffloadingConnector added to the `real-vllm` CI job: preemption with the
 determinism check, failed loads, failed stores.
 
 **Next (Day 20):** sync loads; a revisit workload for partial chunks.
+
+## Day 20 — 2026-11-07
+
+**Built**
+- The copy engine counts transfers that start or end part-way into a chunk.
+- `offload2-chunk2-revisit` and `offload2-chunk3-revisit`: fewer GPU blocks
+  and three times the revisits, each coming back for a random number of whole
+  blocks, so partial chunks are actually exercised (Day 19's `chunk2` loaded
+  12 blocks back).
+- `scripts/offload_campaign.sh`: every target-2 profile, the planted fault,
+  and the two storage failures, one verdict line per run.
+- README: a Phase 5 section with both targets and this campaign.
+
+**Campaign** (50 seeds per run; clean runs replay every seed)
+
+| Run | Result | Evidence |
+|---|---|---|
+| offload2 | PASS 0/50 | 2,634 stored, 170 loaded back |
+| offload2-chunk2 | PASS 0/50 | 93 loaded back, 7 partial-chunk loads |
+| offload2-chunk2-revisit | PASS 0/50 | 576 loaded back, **44 partial-chunk loads** |
+| offload2-chunk3-revisit | PASS 0/50 | 302 loaded back, 5 partial-chunk loads |
+| offload2-slow-stores | PASS 0/50 | 186 flush waits |
+| offload2-preempt | PASS 0/50 | 631 loaded back, 24 flush waits |
+| offload2-small | PASS 0/50 | 2,894 stored |
+| offload2-sync | PASS 0/50 | **96 sync loads** |
+| `store-reported-early` planted | **CAUGHT 24/50** | |
+| load-fails (offload2, chunk2-revisit) | **RECOVERED** 0/50, 0/50 | 33 + 84 failed loads |
+| store-fails (offload2, chunk2-revisit) | **RECOVERED** 0/50, 0/50 | 365 + 392 failed stores |
+
+21,181 blocks stored and 2,243 loaded back across the clean runs, all
+verified, all replayable.
+
+**Observed:** `partial_chunk_stores=0` in every run, including chunk sizes 2
+and 3. vLLM only ever stores whole chunks; partial chunks occur only on
+loads (a request coming back for a prefix that ends inside a chunk). That
+matches the design, and it means the partial-chunk path under test is the
+load side.
+
+**Noise, not failures:** every log contains a vLLM start-up warning with a
+`Traceback` about the tokenizer (`skip_tokenizer_init=True`). It is logged
+and caught inside vLLM at engine start, on passing runs too; my summary
+filter matched the word. All 13 runs finished with the expected verdict.
+
+**Status of Phase 5 (both targets): no bug found.** Two of vLLM's KV
+offloading systems, unmodified, under slow and failing storage, preemption,
+small caches, sync loads and partial chunks: Phantom found nothing wrong,
+and it catches the planted faults in the same conditions.

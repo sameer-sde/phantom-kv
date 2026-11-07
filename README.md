@@ -454,6 +454,60 @@ against the true prompt does. An empty slot is caught in-model on the first
 read. Two independent oracles, each catching what the other can't. All of these
 runs are part of CI. Design: [docs/PD_DESIGN.md](docs/PD_DESIGN.md).
 
+### Phase 5: hunting in vLLM code nobody planted bugs in
+
+Phases 2-4 proved Phantom catches bugs by planting known ones. Phase 5 points
+it at vLLM's KV **offloading** code: when the GPU cache is full, blocks are
+copied to CPU memory and loaded back when a later request needs the same
+prefix. The bookkeeping that decides what goes where is exactly the
+"consistent but wrong" kind of code Phantom is built for.
+
+Both of vLLM's offloading systems run on the CPU backend with their decision
+logic **unmodified**. Only the copy engine (CUDA streams, which the CPU
+backend lacks) is replaced with tensor copies that follow the same
+instructions, on separate load and store queues like the real streams. For
+target 2 this goes through vLLM's own pluggable `OffloadingSpec`, so no vLLM
+code is patched at all.
+
+| Target | vLLM code under test | Design |
+|---|---|---|
+| 1. `SimpleCPUOffloadConnector` | ~1,500-line scheduler-side manager | [OFFLOAD_DESIGN.md](docs/OFFLOAD_DESIGN.md) |
+| 2. `OffloadingConnector` | ~2,600-line scheduler + `CPUOffloadingManager` | [OFFLOAD2_DESIGN.md](docs/OFFLOAD2_DESIGN.md) |
+
+**Target 2 campaign, 50 seeds per run** (`bash scripts/offload_campaign.sh`):
+
+| Run | Result | Evidence |
+|---|---|---|
+| 8 profiles on unmodified vLLM, every seed replayed | **PASS, 0/50 each**, deterministic | 21,181 blocks stored, 2,243 loaded back; 56 partial-chunk loads; 96 sync loads; 314 flush waits |
+| `store-reported-early` planted | ❌ **caught 24/50** | |
+| every 3rd load **fails** (storage failure) | ✅ **recovered**, outputs correct | 117 failed loads, requests recomputed |
+| every 3rd store **fails** (storage failure) | ✅ **recovered**, outputs correct | 757 failed stores, never served |
+
+The last two rows are not bugs we planted: they are failures real storage
+produces, which vLLM's API says it handles. It does.
+
+**Result so far: no bug found in either offloading system.** That is a real
+result for this code under these conditions, and the harness has been
+validated in both directions (planted faults caught, unmodified runs clean
+and replayable).
+
+Two "mysteries" on the way were my own harness, and `phantomkv vllm-diff`
+(run a seed twice, print the first step where the runs differ) found the
+second one in one line:
+
+```
+$ python -m phantomkv vllm-diff --profile cpu-offload-very-slow --seed 0
+first divergence at trace entry 6:
+--- FIRST RUN
+   start   [reset_prefix_cache -> True]
+--- REPLAY
+   start   [reset_prefix_cache -> False]
+```
+
+vLLM was right to refuse the reset (it still had stores queued); the harness
+had stopped stepping while vLLM had pending work. Fixed by stepping while
+`scheduler.has_requests()` is true, as vLLM's own loop does.
+
 ---
 
 ## Quick start
@@ -499,6 +553,9 @@ python -m phantomkv fuzz --seeds 500 --remote-frac 0.9 --abort-frac 0.5
 | `shrink` | `--seed N` · `--plant …` |
 | `vllm-fuzz` | `--seeds N` · `--start S` · `--profile NAME` · `--plant NAME` · `--check-determinism` · `-v` (needs the vLLM environment) |
 | `vllm-shrink` | `--seed N` · `--profile NAME` · `--plant NAME` (needs the vLLM environment) |
+| `vllm-diff` | `--seed N` · `--profile NAME` · `--before SEED` · `--context K` (first step where two runs of a seed differ) |
+| `pd-fuzz` | `--seeds N` · `--fault {swap, silent-drop, duplicate}` · `--plant NAME` · `--check-determinism` · `-v` |
+| `pd-shrink` | `--seed N` · `--fault …` · `--plant …` |
 
 ---
 
@@ -541,7 +598,7 @@ CI runs on every push:
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
-| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)). Target 2: vLLM's OffloadingConnector, plugged in through its own spec API; 5 profiles clean, failed loads/stores recovered correctly, in CI ([design](docs/OFFLOAD2_DESIGN.md)). No bug found yet |
+| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)). Target 2: vLLM's OffloadingConnector, plugged in through its own spec API; 50-seed campaign: 8 profiles clean, planted fault caught, failed loads/stores recovered ([design](docs/OFFLOAD2_DESIGN.md)). No bug found |
 
 Releases: [v0.1.0 – v0.5.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
 
@@ -588,6 +645,7 @@ phantom-kv/
 │   ├── ci_vllm.sh         # real-vLLM acceptance checks (CI + local)
 │   ├── vllm_campaign.sh   # every profile, unmodified + planted
 │   ├── pd_campaign.sh     # two engines: unmodified + every planted bug and fault
+│   ├── offload_campaign.sh # OffloadingConnector: every profile, planted fault, storage failures
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   ├── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 │   └── vllm_pd_check.py   # two engines (prefill + decode) via ExampleConnector
