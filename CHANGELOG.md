@@ -21,6 +21,9 @@ details are in the [devlog](docs/DEVLOG.md).
 - Partial-chunk evidence, revisit-heavy chunk profiles and
   `scripts/offload_campaign.sh`: 50 seeds per run, 8 profiles clean, planted
   fault caught 24/50, storage failures recovered. README Phase 5 section.
+- LMCache (target 3): `scripts/lmcache_smoke.py`, vLLM + LMCache's
+  `LMCacheMPConnector` + a CPU-only LMCache server; 928 tokens stored and
+  loaded back through LMCache, verified by Phantom.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 

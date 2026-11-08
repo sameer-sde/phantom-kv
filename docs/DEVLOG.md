@@ -902,3 +902,53 @@ filter matched the word. All 13 runs finished with the expected verdict.
 offloading systems, unmodified, under slow and failing storage, preemption,
 small caches, sync loads and partial chunks: Phantom found nothing wrong,
 and it catches the planted faults in the same conditions.
+
+## Day 21 — 2026-11-09
+
+**Phase 5, target 3: LMCache.** A separate codebase (a different team from
+vLLM): a KV-cache server vLLM stores KV into and loads it back from, widely
+used in production. Chosen over SGLang, whose CPU backend targets Intel Xeon
+with AMX and would not run on Apple Silicon or most CI runners.
+
+**Built**
+- `scripts/lmcache_smoke.py`: Phantom's model in vLLM with LMCache's own
+  `LMCacheMPConnector`, talking to a CPU-only LMCache server (separate
+  process). Pass A computes 8 prompts; pass B sends the same prefixes plus a
+  new suffix, which can only be served from LMCache.
+- Mac setup without touching the working environment: LMCache (pinned at
+  `a4a6888`, v0.5.8.dev71) installed into a **copy** of the vLLM venv, CPU-only
+  (`NO_GPU_EXT=1`), with torch, numpy and transformers held at their versions.
+
+**Three tries**
+1. Server started, vLLM connected, then: `register_kv_cache_engine_driven_context
+   is not enabled`. Without a GPU, vLLM's worker has to do the copies itself
+   ("engine-driven"), and the server only enables the GPU path by default.
+   Fix: `--supported-transfer-mode engine_driven`.
+2. **PASS that was not a pass.** Pass B computed only 157 of 1,061 tokens, 0
+   violations, correct outputs. But the GPU prefix-cache reset had been
+   refused (`False`), Phantom counted **0** reads of context not computed in
+   this engine, and the server logged stores and **no retrievals**: pass B
+   was served by vLLM's own prefix cache. LMCache's load path had not run.
+3. With vLLM's prefix cache off, reused context can only come from LMCache:
+
+```
+pass A (compute, LMCache stores): 8 prompts, 1021 prompt tokens, computed here=1045, wrong outputs=0
+pass B (prefixes must come from LMCache): 8 prompts, 1061 prompt tokens, computed here=157, wrong outputs=0
+Phantom violations: 0          context_not_computed_here=672
+LMCache server: 10 stores, 8 retrievals (928 tokens)
+RESULT: PASS
+```
+
+KV went from vLLM to the LMCache server and back, 928 tokens of it, and
+Phantom verified every slot read from it (8,424 slot checks) and every
+output.
+
+**Learned**
+- Try 2 is the reason the evidence counters exist: an output-only test
+  would have reported LMCache working without LMCache ever loading anything.
+
+**Next (Day 22)**
+- LMCache as a `vllm-fuzz` profile (server started and reset per campaign),
+  so it gets seeded workloads, aborts, preemption and replay checks like
+  the vLLM targets; then a small L1 cache (LMCache-side eviction) and a
+  server restart in the middle of a run.
