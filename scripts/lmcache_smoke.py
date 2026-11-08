@@ -4,7 +4,7 @@ Needs an LMCache server already running (CPU-only mode), e.g.:
     lmcache server --l1-size-gb 1 --chunk-size 32 --port 5555 --eviction-policy LRU
 
 Pass A computes N prompts; vLLM's LMCacheMPConnector stores their KV in the
-LMCache server. The GPU prefix cache is then reset, so in pass B the same
+LMCache server. vLLM's own prefix cache is off, so in pass B the same
 prefixes can only come back from LMCache. Phantom checks every slot read in
 both passes and every output token against the pure-Python reference, and
 the model's write counter shows how much of pass B was loaded rather than
@@ -45,7 +45,10 @@ def main() -> int:
         model="facebook/opt-125m",
         hf_overrides={"architectures": ["PhantomForCausalLM"]},
         load_format="dummy", skip_tokenizer_init=True, dtype="float32",
-        enforce_eager=True, enable_prefix_caching=True, block_size=32,
+        # vLLM's own prefix cache OFF: then any context the engine did not
+        # compute itself can only have come from LMCache (Phantom's
+        # context_not_computed_here counts those reads)
+        enforce_eager=True, enable_prefix_caching=False, block_size=32,
         max_model_len=512, max_num_seqs=4, kv_cache_memory_bytes=64 * page_bytes(32),
         seed=0,
         kv_transfer_config=KVTransferConfig(
@@ -83,8 +86,6 @@ def main() -> int:
         return bad
 
     bad = run("pass A (compute, LMCache stores)", prompts)
-    ok = llm.reset_prefix_cache()
-    print(f"GPU prefix cache reset: {ok}")
     # same prefixes, new suffix: anything not recomputed came from LMCache
     second = [p + [rng.randrange(1, 50_000) for _ in range(5)] for p in prompts]
     bad += run("pass B (prefixes must come from LMCache)", second)
@@ -94,8 +95,11 @@ def main() -> int:
     for v in violations[:5]:
         print("  ", v)
     s = stats()
+    loaded = s.get("context_not_computed_here", 0)
     print(f"model stats: steps={s.get('steps')} slots_checked={s.get('slots_checked')} "
-          f"context_not_computed_here={s.get('context_not_computed_here')}")
+          f"context_not_computed_here={loaded}")
+    if not loaded:
+        print("warning: no context came from LMCache; the load path was not exercised")
     verdict = "PASS" if not (bad or violations) else "CAUGHT"
     print(f"RESULT: {verdict}")
     return 0 if verdict == "PASS" else 1
