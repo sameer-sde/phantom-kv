@@ -65,6 +65,12 @@ class VllmConfig:
     # offloaded chunk
     offload_chunk_blocks: int = 1
     offload_sync_budget: int = 0  # bytes per step of synchronous (expedited) loads
+    # Phase 5 target 3 (offload="lmcache"): LMCache server L1 size, and whether
+    # vLLM's own GPU prefix cache is on (off: reuse can only come from LMCache)
+    lmcache_l1_gb: float = 1.0
+    gpu_prefix_cache: bool = True
+    lmcache_restart_every: int = 0  # restart the LMCache server every N runs (0: never)
+    lmcache_restart_downtime: float = 0.0  # seconds the server stays down on a restart
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -120,6 +126,19 @@ PROFILES: dict[str, dict] = {
     "offload2-chunk3-revisit": {"offload": "tiered", "offload_chunk_blocks": 3,
                                 "kv_blocks": 32, "revisit_requests": 30,
                                 "revisit_window": 60},
+    # Phase 5 target 3: LMCache (separate CPU-only server; LMCache's own connector)
+    "lmcache": {"offload": "lmcache"},
+    # vLLM's own prefix cache off: every reused prefix must come from LMCache
+    "lmcache-only": {"offload": "lmcache", "gpu_prefix_cache": False},
+    "lmcache-preempt": {"offload": "lmcache", "kv_blocks": 24, "max_num_seqs": 8},
+    # ~1 MB of LMCache memory: LMCache-side eviction under load
+    "lmcache-small": {"offload": "lmcache", "gpu_prefix_cache": False, "lmcache_l1_gb": 0.001},
+    # the LMCache server is killed and restarted between runs, losing everything
+    "lmcache-restart": {"offload": "lmcache", "gpu_prefix_cache": False,
+                        "lmcache_restart_every": 1},
+    # same, but the server stays down 25 s, longer than LMCache's 10 s heartbeat
+    "lmcache-restart-slow": {"offload": "lmcache", "gpu_prefix_cache": False,
+                             "lmcache_restart_every": 1, "lmcache_restart_downtime": 25.0},
 }
 
 
@@ -241,6 +260,13 @@ class VllmRunner:
                     os.environ[f"PHANTOM_OFFLOAD_{kind.upper()}_DELAY"] = str(val)
         else:
             os.environ.pop("PHANTOM_OFFLOAD", None)
+        self.lmcache = None
+        if self.cfg.offload == "lmcache":
+            from .lmcache_server import LMCacheServer
+
+            self.lmcache = LMCacheServer(l1_gb=self.cfg.lmcache_l1_gb,
+                                         chunk_size=self.cfg.block_size)
+            self.lmcache.start()
         if self.cfg.offload == "tiered":  # read by vllm_offload2.PhantomOffloadWorker
             for kind in ("store", "load"):
                 val = getattr(self.cfg, f"offload_{kind}_delay")
@@ -257,7 +283,7 @@ class VllmRunner:
             dtype="float32",
             enforce_eager=True,
             async_scheduling=self.cfg.async_scheduling,
-            enable_prefix_caching=True,
+            enable_prefix_caching=self.cfg.gpu_prefix_cache,
             block_size=self.cfg.block_size,
             max_model_len=self.cfg.max_model_len,
             max_num_seqs=self.cfg.max_num_seqs,
@@ -274,7 +300,19 @@ class VllmRunner:
         if self.cfg.max_num_batched_tokens is not None:
             args.update(enable_chunked_prefill=True,
                         max_num_batched_tokens=self.cfg.max_num_batched_tokens)
-        if self.cfg.offload == "tiered":
+        if self.cfg.offload == "lmcache":
+            from vllm.config import KVTransferConfig
+
+            args["kv_transfer_config"] = KVTransferConfig(
+                kv_connector="LMCacheMPConnector",  # LMCache's own connector, unmodified
+                kv_connector_module_path="lmcache.integration.vllm.lmcache_mp_connector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "lmcache.mp.host": "tcp://localhost",
+                    "lmcache.mp.port": self.lmcache.port,
+                    "lmcache.mp.mp_transfer_mode": "engine_driven",
+                })
+        elif self.cfg.offload == "tiered":
             import mmap
 
             from vllm.config import KVTransferConfig
@@ -315,11 +353,21 @@ class VllmRunner:
         return mod
 
     def offload_stats(self) -> dict[str, int]:
+        if self.cfg.offload == "lmcache":
+            from .vllm_plants import FIRED
+
+            return dict(self.lmcache.counts(), plant_fired=sum(FIRED.values()))
         if not self.cfg.offload:
             return {}
         return dict(self._xfer().STATS)
 
-    COUNTERS = ("vllm:num_preemptions", "vllm:prefix_cache_hits", "vllm:prefix_cache_queries")
+    @property
+    def has_copy_engine(self) -> bool:
+        """Our own copy engine is in the loop (vLLM offloading targets)."""
+        return self.cfg.offload in ("eager", "lazy", "tiered")
+
+    COUNTERS = ("vllm:num_preemptions", "vllm:prefix_cache_hits", "vllm:prefix_cache_queries",
+                "vllm:external_prefix_cache_hits", "vllm:external_prefix_cache_queries")
 
     def counters(self) -> dict[str, float]:
         """Current values of the vLLM counters we report (summed over labels)."""
@@ -352,6 +400,26 @@ class VllmRunner:
             return [json.loads(line) for line in f if line.strip()]
 
     KEEPALIVE_RID = 99_999
+
+    def _settle_lmcache(self, timeout: float = 2.0) -> None:
+        """Give LMCache's asynchronous RPCs time to complete before each step.
+
+        The harness steps far faster than a real engine (no model compute), so
+        LMCache's lookup replies, which arrive on background threads, never
+        landed within the step budget: every request stayed WAITING (Day 22).
+        Before each step, wait (bounded) until every pending lookup has a
+        result, then a short pause for other in-flight RPCs (stores,
+        retrievals). Lookups then resolve within one step, a deterministic
+        schedule a fast local server can produce."""
+        import time
+
+        conn = getattr(self._scheduler(), "connector", None)
+        lookups = getattr(getattr(conn, "scheduler_adapter", None), "_lookups", None) or {}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and any(
+                getattr(lk, "_result", 0) is None for lk in list(lookups.values())):
+            time.sleep(0.0005)
+        time.sleep(float(os.environ.get("PHANTOM_LMCACHE_STEP_MS", "2")) / 1000)
 
     def _engine_busy(self) -> bool:
         sched = self._scheduler()
@@ -414,7 +482,17 @@ class VllmRunner:
         events = vllm_workload(seed, self.cfg) if events is None else events
         # with CPU offloading, the connector's CPU cache must be reset too, or a
         # replay of the same seed finds blocks the first run stored
-        reset_ok = self.engine.reset_prefix_cache(reset_connector=bool(self.cfg.offload))
+        if self.lmcache is not None:
+            restart = self.cfg.lmcache_restart_every
+            self.runs_started = getattr(self, "runs_started", 0) + 1
+            if restart and self.runs_started > 1 and (self.runs_started - 1) % restart == 0:
+                self.lmcache.restart(self.cfg.lmcache_restart_downtime)  # fault: store loses everything
+            elif not self.lmcache.clear():  # replays must start from an empty store
+                self.resets_refused += 1
+        reset_connector = bool(self.cfg.offload)
+        if self.lmcache is not None and os.environ.get("PHANTOM_LMCACHE_CONNECTOR_RESET") == "0":
+            reset_connector = False  # diagnostic: clear LMCache over HTTP only
+        reset_ok = self.engine.reset_prefix_cache(reset_connector=reset_connector)
         offset = self._report_offset()
         before = self.counters()
         mbefore = self.model_stats()
@@ -435,7 +513,7 @@ class VllmRunner:
         xfer = None
         if self.tracing:
             trace.append(("start", f"reset_prefix_cache -> {reset_ok}"))
-            if self.cfg.offload:
+            if self.has_copy_engine:
                 xfer = self._xfer()
                 xfer.TRACE_ON = True
                 xfer.TRACE.clear()
@@ -461,6 +539,8 @@ class VllmRunner:
                 # it has work (scheduler.has_requests(): e.g. a connector's
                 # pending stores), as vLLM's own engine loop does.
                 if live or self._engine_busy():
+                    if self.lmcache is not None:
+                        self._settle_lmcache()
                     for out in self.engine.step():
                         rid = int(str(out.request_id).split("-")[0])
                         if self.tracing:
@@ -477,8 +557,12 @@ class VllmRunner:
                 if self.tracing:
                     sched = self._scheduler()
                     if sched is not None:
+                        from collections import Counter
+
+                        states = Counter(r.status.name for r in sched.waiting)
                         trace.append((f"{step} sched running={len(sched.running)} "
-                                      f"waiting={len(sched.waiting)}", ""))
+                                      f"waiting={len(sched.waiting)}",
+                                      " ".join(f"{k}={v}" for k, v in sorted(states.items()))))
                     if xfer is not None:
                         for tick, phase, kind, event, n, blocks in xfer.TRACE:
                             trace.append((f"{step} {kind} {phase} n={n}",
@@ -499,7 +583,7 @@ class VllmRunner:
 
         # Offload transfers still in flight: keep the engine stepping (with a
         # keep-alive request) until they complete, so none lands in the next run.
-        if self.cfg.offload and engine_error is None and not live:
+        if self.has_copy_engine and engine_error is None and not live:
             step, engine_error = self._drain_offload(seed, step, prompts, outputs, finished,
                                                      trace if self.tracing else None)
 
@@ -531,6 +615,13 @@ class VllmRunner:
             metrics["offload_" + k] = v - obefore.get(k, 0)
         if not reset_ok:
             self.resets_refused += 1  # this run was not isolated from the previous one
+        if self.lmcache is not None and engine_error is None:
+            # every request of this run has finished or been aborted: an ordinary
+            # (non-forced) clear should leave nothing behind; what it cannot
+            # remove is still locked by someone
+            self.lmcache.clear()
+            left = self.lmcache.l1_objects()
+            metrics["lmcache_left_after_clear"] = -1 if left is None else left
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,

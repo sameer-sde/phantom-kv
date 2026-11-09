@@ -952,3 +952,63 @@ output.
   so it gets seeded workloads, aborts, preemption and replay checks like
   the vLLM targets; then a small L1 cache (LMCache-side eviction) and a
   server restart in the middle of a run.
+
+## Day 22 — 2026-11-10
+
+**LMCache under `vllm-fuzz`.** One CPU-only LMCache server per campaign
+(`phantomkv/lmcache_server.py`), cleared between runs, restartable as a
+fault. Profiles `lmcache`, `lmcache-only` (vLLM's own prefix cache off),
+`lmcache-preempt`, `lmcache-small` (~1 MB LMCache memory),
+`lmcache-restart`, `lmcache-restart-slow`; a planted bug in LMCache's own
+scatter path.
+
+**A long night of my own mistakes first**
+1. Every run stalled: requests stayed `WAITING` for all 3,000 steps. Not
+   the reset (ruled out), not LMCache: its debug log answered every lookup
+   in about 1 ms, but the whole run took 0.4 s. With no model compute, the
+   harness steps far faster than a real engine, and LMCache's replies land
+   on background threads. The Day 21 smoke test worked only because
+   `generate()` is not step-capped. Fix: before each step, wait (bounded)
+   until every pending lookup has a result, plus 2 ms for other RPCs.
+2. The between-run clear sent `tier: all`; only `l1` is supported.
+3. The first planted bug (rotate the chunk list) never fired: here each
+   group's chunks are not a multi-element list. The second (rotate block
+   ids in `_scatter_group`) never fired either: this setup retrieves
+   through a path that calls `scatter_cpu_to_paged_kv` directly. A firing
+   counter now shows it; the third plant wraps that function.
+
+**Results** (10 seeds each, unmodified vLLM + LMCache)
+
+| Run | Result | Evidence |
+|---|---|---|
+| lmcache | clean, deterministic | 192 stores, 21 retrievals, 1,120 tokens from LMCache |
+| lmcache-only | 0 violations; 3 seeds differ on replay (below) | 190 stores, 188 retrievals, **11,040 tokens from LMCache** |
+| lmcache-preempt | 0 violations; same 3 seeds differ | 6 preemptions, 4,448 tokens from LMCache |
+| lmcache-small | 0 violations; same 3 seeds differ | 11,040 tokens from LMCache |
+| planted `lmcache-chunk-rotate` | **caught 10/10** (fired 101 times) | 1,149 `misplaced-block`, 99 wrong outputs |
+
+**Lead 1, confirmed on my side: a fast LMCache server restart is never
+noticed.** After the server restarts, LMCache stored almost nothing for the
+rest of the campaign, and vLLM logged `Something went wrong when processing
+the store request`. In LMCache's code, the vLLM-side adapter re-registers
+its KV caches only when its heartbeat (every 10 s) sees a failed ping and
+then a successful one, and the server's `ping` handler always returns
+`True`, even for a worker it no longer knows. Experiment:
+
+| Restart | Stores per server lifetime | Recovery |
+|---|---|---|
+| fast (seconds) | 19, **0, 0, 0** | never noticed |
+| slow (down 25 s) | 19, 20, 21, 6 | `server is healthy again`, re-registered |
+
+Outputs stayed correct throughout (vLLM recomputes), so this is lost
+caching, not wrong answers. Before calling it an LMCache bug: a standalone
+reproduction, a check of LMCache's issues for an existing report, and the
+exact behaviour of a restarted server (Day 23).
+
+**Lead 2, open: objects left locked between runs.** In `lmcache-only`,
+`-preempt` and `-small`, the same seeds (6, 7, 9) differ on replay; outputs
+are correct. With a **forced** clear between runs the differences vanish,
+so an ordinary clear was leaving objects behind, which it does only for
+locked objects, after every request of the run had finished or been
+aborted. Counting them failed: LMCache's object listing is not available
+for L1 here. Needs another probe.

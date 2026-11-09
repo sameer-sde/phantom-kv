@@ -102,6 +102,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 nondeterministic += 1
                 failing.append(res)
                 continue
+        left = res.metrics.get("lmcache_left_after_clear", 0)
+        if left > 0:
+            print(f"seed {seed}: {left} LMCache objects survived a clear after all of "
+                  "this seed's requests were done")
         if not res.ok:
             failing.append(res)
             for k, n in res.kinds.items():
@@ -118,13 +122,20 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
               f"prefix_cache_hit_tokens={int(hits)}{rate} "
               f"chunked_prefill_continuations={int(totals.get('prefill_continuations', 0))} "
               f"max_tokens_per_step={int(totals.get('max_step_tokens', 0))}")
+        ext = int(totals.get("external_prefix_cache_hits", 0))
+        if ext or runner.cfg.offload == "lmcache":
+            print(f"connector (external) prefix cache hits: {ext} tokens")
+        if runner.cfg.offload == "lmcache" and runner.lmcache.restarts:
+            print(f"LMCache server restarts: {runner.lmcache.restarts}")
+        if runner.cfg.offload == "lmcache" and not ext:
+            print("warning: no prefix came from LMCache; its load path was not exercised")
         if any(k.startswith("offload_") for k in totals):
             print("cpu offload: " + " ".join(f"{k[len('offload_'):]}={int(v)}"
                                              for k, v in totals.items() if k.startswith("offload_")))
             if runner.resets_refused:
                 print(f"warning: vLLM refused {runner.resets_refused} cache resets; those runs "
                       "started with the previous run's cache, so replays can differ")
-            if not totals.get("offload_blocks_loaded"):
+            if runner.has_copy_engine and not totals.get("offload_blocks_loaded"):
                 print("warning: no block was loaded back from the CPU cache; "
                       "the offload load path was not exercised")
     if not failing:
@@ -313,6 +324,10 @@ def _vllm_diff(a: argparse.Namespace) -> int:
               f"mismatches={len(res.mismatches)} fingerprint={res.fingerprint}")
         runs.append(res)
     one, two = runs[-2], runs[-1]
+    if a.dump:
+        print(f"\nfirst {a.dump} trace entries of the first run:")
+        for key, detail in one.trace[:a.dump]:
+            print(f"   {key}" + (f"   [{detail}]" if detail else ""))
     i = first_divergence(one.trace, two.trace)
     if i is None:
         print("\nthe two runs are identical step by step")
@@ -365,7 +380,8 @@ def main(argv: list[str] | None = None) -> int:
                         "cpu-offload-very-slow, cpu-offload-preempt, cpu-offload-slow-stores, "
                         "offload2, offload2-chunk2, offload2-slow-stores, offload2-preempt, "
                         "offload2-small, offload2-sync, offload2-chunk2-revisit, "
-                        "offload2-chunk3-revisit")
+                        "offload2-chunk3-revisit, lmcache, lmcache-only, lmcache-preempt, "
+                        "lmcache-small, lmcache-restart, lmcache-restart-slow")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")
@@ -395,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="run this seed first, so the first run follows a different seed")
     vd.add_argument("--context", type=int, default=12, help="entries shown before the split")
     vd.add_argument("--after", type=int, default=8, help="entries shown after the split")
+    vd.add_argument("--dump", type=int, default=0, help="also print the first N entries of the first run")
     vd.set_defaults(fn=_vllm_diff)
 
     pf = sub.add_parser("pd-fuzz", help="seeded fuzzing of two-engine prefill/decode on real vLLM")
