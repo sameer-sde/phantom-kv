@@ -463,7 +463,10 @@ class VllmRunner:
                 self.lmcache.restart()  # fault: the store loses everything
             elif not self.lmcache.clear():  # replays must start from an empty store
                 self.resets_refused += 1
-        reset_ok = self.engine.reset_prefix_cache(reset_connector=bool(self.cfg.offload))
+        reset_connector = bool(self.cfg.offload)
+        if self.lmcache is not None and os.environ.get("PHANTOM_LMCACHE_CONNECTOR_RESET") == "0":
+            reset_connector = False  # diagnostic: clear LMCache over HTTP only
+        reset_ok = self.engine.reset_prefix_cache(reset_connector=reset_connector)
         offset = self._report_offset()
         before = self.counters()
         mbefore = self.model_stats()
