@@ -121,6 +121,8 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
         ext = int(totals.get("external_prefix_cache_hits", 0))
         if ext or runner.cfg.offload == "lmcache":
             print(f"connector (external) prefix cache hits: {ext} tokens")
+        if runner.cfg.offload == "lmcache" and runner.lmcache.restarts:
+            print(f"LMCache server restarts: {runner.lmcache.restarts}")
         if runner.cfg.offload == "lmcache" and not ext:
             print("warning: no prefix came from LMCache; its load path was not exercised")
         if any(k.startswith("offload_") for k in totals):
@@ -375,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                         "offload2, offload2-chunk2, offload2-slow-stores, offload2-preempt, "
                         "offload2-small, offload2-sync, offload2-chunk2-revisit, "
                         "offload2-chunk3-revisit, lmcache, lmcache-only, lmcache-preempt, "
-                        "lmcache-small, lmcache-restart")
+                        "lmcache-small, lmcache-restart, lmcache-restart-slow")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")

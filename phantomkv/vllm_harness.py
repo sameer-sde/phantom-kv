@@ -70,6 +70,7 @@ class VllmConfig:
     lmcache_l1_gb: float = 1.0
     gpu_prefix_cache: bool = True
     lmcache_restart_every: int = 0  # restart the LMCache server every N runs (0: never)
+    lmcache_restart_downtime: float = 0.0  # seconds the server stays down on a restart
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -135,6 +136,9 @@ PROFILES: dict[str, dict] = {
     # the LMCache server is killed and restarted between runs, losing everything
     "lmcache-restart": {"offload": "lmcache", "gpu_prefix_cache": False,
                         "lmcache_restart_every": 1},
+    # same, but the server stays down 25 s, longer than LMCache's 10 s heartbeat
+    "lmcache-restart-slow": {"offload": "lmcache", "gpu_prefix_cache": False,
+                             "lmcache_restart_every": 1, "lmcache_restart_downtime": 25.0},
 }
 
 
@@ -350,7 +354,9 @@ class VllmRunner:
 
     def offload_stats(self) -> dict[str, int]:
         if self.cfg.offload == "lmcache":
-            return dict(self.lmcache.counts(), server_restarts=self.lmcache.restarts)
+            from .vllm_plants import FIRED
+
+            return dict(self.lmcache.counts(), plant_fired=sum(FIRED.values()))
         if not self.cfg.offload:
             return {}
         return dict(self._xfer().STATS)
@@ -480,7 +486,7 @@ class VllmRunner:
             restart = self.cfg.lmcache_restart_every
             self.runs_started = getattr(self, "runs_started", 0) + 1
             if restart and self.runs_started > 1 and (self.runs_started - 1) % restart == 0:
-                self.lmcache.restart()  # fault: the store loses everything
+                self.lmcache.restart(self.cfg.lmcache_restart_downtime)  # fault: store loses everything
             elif not self.lmcache.clear():  # replays must start from an empty store
                 self.resets_refused += 1
         reset_connector = bool(self.cfg.offload)

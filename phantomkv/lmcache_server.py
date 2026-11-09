@@ -70,9 +70,13 @@ class LMCacheServer:
                 self.proc.kill()
         self.proc = None
 
-    def restart(self) -> None:
-        """Kill and restart: every stored chunk is gone; vLLM must cope."""
+    def restart(self, downtime: float = 0.0) -> None:
+        """Kill and restart: every stored chunk and every registration is gone;
+        vLLM must cope. `downtime` keeps the server down that long first."""
+        import time
+
         self.stop()
+        time.sleep(downtime)
         self.start()
         self.restarts += 1
 
@@ -81,7 +85,8 @@ class LMCacheServer:
         nothing is in flight between runs, so no force)."""
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.http_port}/cache/clear",
-            data=json.dumps({"tier": "l1", "force": False}).encode(),
+            data=json.dumps({"tier": "l1", "force": os.environ.get(
+                "PHANTOM_LMCACHE_FORCE_CLEAR") == "1"}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
