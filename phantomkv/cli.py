@@ -318,6 +318,10 @@ def _vllm_diff(a: argparse.Namespace) -> int:
               f"mismatches={len(res.mismatches)} fingerprint={res.fingerprint}")
         runs.append(res)
     one, two = runs[-2], runs[-1]
+    if a.dump:
+        print(f"\nfirst {a.dump} trace entries of the first run:")
+        for key, detail in one.trace[:a.dump]:
+            print(f"   {key}" + (f"   [{detail}]" if detail else ""))
     i = first_divergence(one.trace, two.trace)
     if i is None:
         print("\nthe two runs are identical step by step")
@@ -401,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="run this seed first, so the first run follows a different seed")
     vd.add_argument("--context", type=int, default=12, help="entries shown before the split")
     vd.add_argument("--after", type=int, default=8, help="entries shown after the split")
+    vd.add_argument("--dump", type=int, default=0, help="also print the first N entries of the first run")
     vd.set_defaults(fn=_vllm_diff)
 
     pf = sub.add_parser("pd-fuzz", help="seeded fuzzing of two-engine prefill/decode on real vLLM")

@@ -77,10 +77,11 @@ class LMCacheServer:
         self.restarts += 1
 
     def clear(self) -> bool:
-        """Empty every tier, including objects held by readers (between runs)."""
+        """Empty LMCache's L1 between runs (the only tier the clear API supports;
+        nothing is in flight between runs, so no force)."""
         req = urllib.request.Request(
             f"http://127.0.0.1:{self.http_port}/cache/clear",
-            data=json.dumps({"tier": "all", "force": True}).encode(),
+            data=json.dumps({"tier": "l1", "force": False}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=30) as r:

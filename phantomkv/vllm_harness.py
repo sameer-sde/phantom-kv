@@ -526,8 +526,12 @@ class VllmRunner:
                 if self.tracing:
                     sched = self._scheduler()
                     if sched is not None:
+                        from collections import Counter
+
+                        states = Counter(r.status.name for r in sched.waiting)
                         trace.append((f"{step} sched running={len(sched.running)} "
-                                      f"waiting={len(sched.waiting)}", ""))
+                                      f"waiting={len(sched.waiting)}",
+                                      " ".join(f"{k}={v}" for k, v in sorted(states.items()))))
                     if xfer is not None:
                         for tick, phase, kind, event, n, blocks in xfer.TRACE:
                             trace.append((f"{step} {kind} {phase} n={n}",
