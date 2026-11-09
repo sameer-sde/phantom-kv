@@ -102,6 +102,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 nondeterministic += 1
                 failing.append(res)
                 continue
+        left = res.metrics.get("lmcache_left_after_clear", 0)
+        if left:
+            print(f"seed {seed}: {left if left > 0 else 'unknown'} LMCache objects survived "
+                  "a clear after all of this seed's requests were done")
         if not res.ok:
             failing.append(res)
             for k, n in res.kinds.items():

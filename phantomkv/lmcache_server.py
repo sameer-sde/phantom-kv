@@ -94,6 +94,24 @@ class LMCacheServer:
         except Exception:
             return False
 
+    def l1_objects(self) -> int | None:
+        """Objects resident in LMCache's L1 (None if the listing is unavailable)."""
+        total, token = 0, None
+        for _ in range(100):
+            url = f"http://127.0.0.1:{self.http_port}/cache/objects?tier=l1&page_size=1000"
+            if token:
+                url += f"&page_token={token}"
+            try:
+                with urllib.request.urlopen(url, timeout=30) as r:
+                    page = json.load(r)
+            except Exception:
+                return None
+            total += len(page.get("entries") or [])
+            token = page.get("next_page_token")
+            if not token:
+                return total
+        return total
+
     def counts(self) -> dict[str, int]:
         """Stores and retrievals the server has logged so far."""
         try:

@@ -615,6 +615,13 @@ class VllmRunner:
             metrics["offload_" + k] = v - obefore.get(k, 0)
         if not reset_ok:
             self.resets_refused += 1  # this run was not isolated from the previous one
+        if self.lmcache is not None and engine_error is None:
+            # every request of this run has finished or been aborted: an ordinary
+            # (non-forced) clear should leave nothing behind; what it cannot
+            # remove is still locked by someone
+            self.lmcache.clear()
+            left = self.lmcache.l1_objects()
+            metrics["lmcache_left_after_clear"] = -1 if left is None else left
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,
