@@ -24,6 +24,9 @@ details are in the [devlog](docs/DEVLOG.md).
 - LMCache (target 3): `scripts/lmcache_smoke.py`, vLLM + LMCache's
   `LMCacheMPConnector` + a CPU-only LMCache server; 928 tokens stored and
   loaded back through LMCache, verified by Phantom.
+- LMCache under `vllm-fuzz` (`lmcache*` profiles, one server per campaign,
+  restart fault, planted bug in LMCache's scatter path caught 10/10).
+  Lead: after a fast server restart vLLM never re-registers with LMCache.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
