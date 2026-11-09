@@ -395,6 +395,26 @@ class VllmRunner:
 
     KEEPALIVE_RID = 99_999
 
+    def _settle_lmcache(self, timeout: float = 2.0) -> None:
+        """Give LMCache's asynchronous RPCs time to complete before each step.
+
+        The harness steps far faster than a real engine (no model compute), so
+        LMCache's lookup replies, which arrive on background threads, never
+        landed within the step budget: every request stayed WAITING (Day 22).
+        Before each step, wait (bounded) until every pending lookup has a
+        result, then a short pause for other in-flight RPCs (stores,
+        retrievals). Lookups then resolve within one step, a deterministic
+        schedule a fast local server can produce."""
+        import time
+
+        conn = getattr(self._scheduler(), "connector", None)
+        lookups = getattr(getattr(conn, "scheduler_adapter", None), "_lookups", None) or {}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and any(
+                getattr(lk, "_result", 0) is None for lk in list(lookups.values())):
+            time.sleep(0.0005)
+        time.sleep(float(os.environ.get("PHANTOM_LMCACHE_STEP_MS", "2")) / 1000)
+
     def _engine_busy(self) -> bool:
         sched = self._scheduler()
         return bool(sched is not None and sched.has_requests())
@@ -513,6 +533,8 @@ class VllmRunner:
                 # it has work (scheduler.has_requests(): e.g. a connector's
                 # pending stores), as vLLM's own engine loop does.
                 if live or self._engine_busy():
+                    if self.lmcache is not None:
+                        self._settle_lmcache()
                     for out in self.engine.step():
                         rid = int(str(out.request_id).split("-")[0])
                         if self.tracing:
