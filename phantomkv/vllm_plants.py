@@ -91,6 +91,25 @@ def _abort_free_race() -> None:
     Scheduler._update_from_kv_xfer_finished = _update_from_kv_xfer_finished
 
 
+def _lmcache_chunk_rotate() -> None:
+    """LMCache (target 3): when a retrieval scatters several chunks back into
+    vLLM's paged KV, the chunk list is rotated by one, so every chunk lands in
+    its neighbour's blocks. Planted in LMCache's own scatter path
+    (EngineDrivenTransferContext._scatter_group), not in vLLM."""
+    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
+
+    orig = EngineDrivenTransferContext._scatter_group
+
+    def _scatter_group(self, kv_caches, gid, group_block_ids, chunks, first_chunk,
+                       skip_first_n_tokens):
+        if len(chunks) > 1:
+            chunks = list(chunks[1:]) + [chunks[0]]  # BUG (planted)
+        return orig(self, kv_caches, gid, group_block_ids, chunks, first_chunk,
+                    skip_first_n_tokens)
+
+    EngineDrivenTransferContext._scatter_group = _scatter_group
+
+
 PLANTS: dict[str, Callable[[], None]] = {
     # bug class 1: hash -> block index keeps an entry for an evicted block
     "stale-prefix-cache": _stale_prefix_cache,
@@ -98,6 +117,8 @@ PLANTS: dict[str, Callable[[], None]] = {
     "missing-touch": _missing_touch,
     # bug class 3 (PD): blocks freed while an async KV load is still in flight
     "abort-free-race": _abort_free_race,
+    # bug class 4 (LMCache): retrieved chunks scattered into the wrong blocks
+    "lmcache-chunk-rotate": _lmcache_chunk_rotate,
 }
 
 
