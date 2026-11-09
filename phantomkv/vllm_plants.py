@@ -97,21 +97,21 @@ FIRED: dict[str, int] = {}  # how often each plant changed something (in-process
 def _lmcache_chunk_rotate() -> None:
     """LMCache (target 3): when a retrieval scatters chunks back into vLLM's
     paged KV, the destination block ids are rotated by one, so every block's
-    KV lands in its neighbour. Planted in LMCache's own scatter path
-    (EngineDrivenTransferContext._scatter_group), not in vLLM."""
-    from lmcache.v1.client.worker_transfer import EngineDrivenTransferContext
+    KV lands in its neighbour. Planted in LMCache's own worker-side scatter
+    (worker_transfer.scatter_cpu_to_paged_kv, used by every retrieve path),
+    not in vLLM."""
+    from lmcache.v1.client import worker_transfer as wt
 
-    orig = EngineDrivenTransferContext._scatter_group
+    orig = wt.scatter_cpu_to_paged_kv
 
-    def _scatter_group(self, kv_caches, gid, group_block_ids, chunks, first_chunk,
-                       skip_first_n_tokens):
-        ids = list(group_block_ids)
+    def scatter_cpu_to_paged_kv(kv_caches, block_ids, *args, **kwargs):
+        ids = list(block_ids)
         if len(ids) > 1:
             ids = ids[1:] + ids[:1]  # BUG (planted)
             FIRED["lmcache-chunk-rotate"] = FIRED.get("lmcache-chunk-rotate", 0) + 1
-        return orig(self, kv_caches, gid, ids, chunks, first_chunk, skip_first_n_tokens)
+        return orig(kv_caches, ids, *args, **kwargs)
 
-    EngineDrivenTransferContext._scatter_group = _scatter_group
+    wt.scatter_cpu_to_paged_kv = scatter_cpu_to_paged_kv
 
 
 PLANTS: dict[str, Callable[[], None]] = {
