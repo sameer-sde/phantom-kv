@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import random
+import time
 from dataclasses import dataclass, field
 
 from .sim import Event
@@ -71,6 +72,7 @@ class VllmConfig:
     gpu_prefix_cache: bool = True
     lmcache_restart_every: int = 0  # restart the LMCache server every N runs (0: never)
     lmcache_restart_downtime: float = 0.0  # seconds the server stays down on a restart
+    lmcache_restart_settle: float = 0.0  # seconds to wait, server up, before the next run
 
 
 # Phase 3: each profile stresses a different part of vLLM's KV bookkeeping.
@@ -139,6 +141,10 @@ PROFILES: dict[str, dict] = {
     # same, but the server stays down 25 s, longer than LMCache's 10 s heartbeat
     "lmcache-restart-slow": {"offload": "lmcache", "gpu_prefix_cache": False,
                              "lmcache_restart_every": 1, "lmcache_restart_downtime": 25.0},
+    # a fast restart, then 12 s with the server up before the run: longer than
+    # LMCache's 10 s heartbeat, so vLLM has had a full ping to notice the restart
+    "lmcache-restart-settle": {"offload": "lmcache", "gpu_prefix_cache": False,
+                               "lmcache_restart_every": 1, "lmcache_restart_settle": 12.0},
 }
 
 
@@ -411,7 +417,6 @@ class VllmRunner:
         result, then a short pause for other in-flight RPCs (stores,
         retrievals). Lookups then resolve within one step, a deterministic
         schedule a fast local server can produce."""
-        import time
 
         conn = getattr(self._scheduler(), "connector", None)
         lookups = getattr(getattr(conn, "scheduler_adapter", None), "_lookups", None) or {}
@@ -487,6 +492,7 @@ class VllmRunner:
             self.runs_started = getattr(self, "runs_started", 0) + 1
             if restart and self.runs_started > 1 and (self.runs_started - 1) % restart == 0:
                 self.lmcache.restart(self.cfg.lmcache_restart_downtime)  # fault: store loses everything
+                time.sleep(self.cfg.lmcache_restart_settle)
             elif not self.lmcache.clear():  # replays must start from an empty store
                 self.resets_refused += 1
         reset_connector = bool(self.cfg.offload)

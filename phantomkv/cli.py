@@ -381,7 +381,7 @@ def main(argv: list[str] | None = None) -> int:
                         "offload2, offload2-chunk2, offload2-slow-stores, offload2-preempt, "
                         "offload2-small, offload2-sync, offload2-chunk2-revisit, "
                         "offload2-chunk3-revisit, lmcache, lmcache-only, lmcache-preempt, "
-                        "lmcache-small, lmcache-restart, lmcache-restart-slow")
+                        "lmcache-small, lmcache-restart, lmcache-restart-slow, lmcache-restart-settle")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")
