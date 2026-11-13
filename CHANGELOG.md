@@ -27,6 +27,9 @@ details are in the [devlog](docs/DEVLOG.md).
 - LMCache under `vllm-fuzz` (`lmcache*` profiles, one server per campaign,
   restart fault, planted bug in LMCache's scatter path caught 10/10).
   Lead: after a fast server restart vLLM never re-registers with LMCache.
+- `lmcache-restart-settle` profile. The restart lead is a known LMCache bug
+  (issue #4642), found independently; an A/B test of the open fix
+  (PR #6106) shows caching recovers after every restart.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 

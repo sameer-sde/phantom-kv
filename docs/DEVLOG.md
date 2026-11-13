@@ -1012,3 +1012,53 @@ so an ordinary clear was leaving objects behind, which it does only for
 locked objects, after every request of the run had finished or been
 aborted. Counting them failed: LMCache's object listing is not available
 for L1 here. Needs another probe.
+
+## Day 23 — 2026-11-14
+
+**The restart lead is a known bug, and Phantom confirms the open fix.**
+Before writing anything up I searched LMCache's tracker. The bug is
+already reported: issue #4642 (an LMCache server restart needs a vLLM
+restart), with two open fix PRs. PR #4687 detects restarts from a per-boot
+token. PR #6106 makes the server's `ping` answer `False` for a worker it
+no longer has registered, so the worker re-registers. PR #6106's
+description names our exact case: a restart faster than one heartbeat. So
+Phantom found it independently on Day 22, but it is not new, and I'm not
+filing a duplicate. What Phantom can add is an end-to-end test of the fix.
+
+**New profile `lmcache-restart-settle`:** a fast restart, then 12 s with
+the server up before the next run. That is longer than one 10 s
+heartbeat, so "vLLM just hadn't pinged yet" cannot explain a failure to
+recover.
+
+**A/B test** (4 seeds each). PR #6106 is based on an older commit
+(`6993f46`) than my install (`a4a6888`), so the clean comparison is that
+base with and without the PR. Each run had a time limit.
+
+| LMCache | Profile | Stores per server lifetime | Re-registrations | Result |
+|---|---|---|---|---|
+| `a4a6888` (installed) | restart-settle | 19, **0, 0, 0** | 0 | caching lost, outputs correct |
+| `6993f46` (PR base) | restart-settle | 19, 0, then **hang** | 0 | vLLM blocked forever |
+| **PR #6106** (`e49f866`) | restart-settle | 19, **20, 21, 19** | 3 | **recovers**, 0 violations, 3,520 tokens from LMCache |
+| PR #6106 | restart (no wait) | 19, 0, then hang | 1 | hang (below) |
+
+**Why the PR base hangs instead of only losing caching.** After the
+restart, vLLM sends a store for a worker the server no longer knows. The
+server's handler raises (`non-GPU context not registered (or reaped)`),
+and in that older code the ZMQ server logs the error but **sends no reply**,
+so vLLM's `wait_for_save` waits forever. LMCache later made the server
+reply with an error instead (in `a4a6888`), which turns the hang into a
+rejected store. Same root cause, a worse symptom on older code.
+
+**Why the PR still hangs with no wait.** The fix notices the restart at
+the next heartbeat (1 re-registration in the log), but one store arrives
+before that ping and hits the same no-reply path of the old base. The PR
+description already notes that stores sent before the first ping can
+still be rejected. On a current base they would be rejected, not hang.
+
+**Takeaways**
+- Search the tracker before calling something a new bug. A day of
+  experiments still had value: the A/B is independent evidence that the
+  open fix works.
+- A time limit on every trial: a hang is a result, not a stuck terminal.
+
+**Lead 2 (objects left locked between runs) is still open.**
