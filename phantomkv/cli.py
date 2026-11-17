@@ -70,6 +70,24 @@ def _shrink(a: argparse.Namespace) -> int:
     return 1
 
 
+def _report_lmcache_locks(seed: int, label: str, res) -> None:
+    """After a run every request is done, so LMCache should hold no read locks.
+    Print the seed when this run left new ones (locks survive clears, so the
+    count at the start of the run is subtracted)."""
+    m = res.metrics
+    if "lmcache_read_locked_at_start" not in m:
+        return
+    new = m["lmcache_read_locked_before_clear"] - m["lmcache_read_locked_at_start"]
+    aborts = ", ".join(f"{k[len('aborts_in_'):]} {v}" for k, v in sorted(m.items())
+                       if k.startswith("aborts_in_")) or "none"
+    if new or aborts != "none":
+        print(f"seed {seed}{label}: aborted ({aborts}); "
+              f"read locks left by this run {new} "
+              f"(held in total {m['lmcache_read_locked_before_clear']}, "
+              f"write-locked {m['lmcache_write_locked_before_clear']}); "
+              f"left after clear {m['lmcache_objects_after_clear']}")
+
+
 def _vllm_fuzz(a: argparse.Namespace) -> int:
     from .vllm_harness import VllmRunner, profile_config  # needs the vLLM environment
 
@@ -93,8 +111,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 totals[k] = max(totals.get(k, 0), val)
             else:
                 totals[k] = totals.get(k, 0) + val
+        _report_lmcache_locks(seed, "", res)
         if a.check_determinism:
             again = runner.run(seed)
+            _report_lmcache_locks(seed, " (replay)", again)
             if again.fingerprint != res.fingerprint:
                 print(f"seed {seed}: NONDETERMINISTIC (two runs differ: steps "
                       f"{res.steps} vs {again.steps}, outputs "
@@ -102,10 +122,6 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 nondeterministic += 1
                 failing.append(res)
                 continue
-        left = res.metrics.get("lmcache_left_after_clear", 0)
-        if left > 0:
-            print(f"seed {seed}: {left} LMCache objects survived a clear after all of "
-                  "this seed's requests were done")
         if not res.ok:
             failing.append(res)
             for k, n in res.kinds.items():
@@ -381,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                         "offload2, offload2-chunk2, offload2-slow-stores, offload2-preempt, "
                         "offload2-small, offload2-sync, offload2-chunk2-revisit, "
                         "offload2-chunk3-revisit, lmcache, lmcache-only, lmcache-preempt, "
-                        "lmcache-small, lmcache-restart, lmcache-restart-slow, lmcache-restart-settle")
+                        "lmcache-small, lmcache-restart, lmcache-restart-slow, lmcache-restart-settle, lmcache-only-noabort")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")

@@ -598,7 +598,7 @@ CI runs on every push:
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
-| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)). Target 2: vLLM's OffloadingConnector, plugged in through its own spec API; 50-seed campaign: 8 profiles clean, planted fault caught, failed loads/stores recovered ([design](docs/OFFLOAD2_DESIGN.md)). Target 3: LMCache (separate server, CPU-only) under vllm-fuzz: 11,040 tokens served from LMCache verified, planted LMCache bug caught 10/10. Found independently: a fast LMCache server restart is never noticed by vLLM (known upstream, issue #4642); Phantom's A/B shows the open fix (PR #6106) restores caching (stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19) |
+| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | 🔄 target 1: vLLM's CPU KV offloading runs on the CPU backend with its manager unmodified; 7 profiles clean and deterministic, planted fault caught, in CI ([design](docs/OFFLOAD_DESIGN.md)). Target 2: vLLM's OffloadingConnector, plugged in through its own spec API; 50-seed campaign: 8 profiles clean, planted fault caught, failed loads/stores recovered ([design](docs/OFFLOAD2_DESIGN.md)). Target 3: LMCache (separate server, CPU-only) under vllm-fuzz: 11,040 tokens served from LMCache verified, planted LMCache bug caught 10/10. Found independently: a fast LMCache server restart is never noticed by vLLM (known upstream, issue #4642); Phantom's A/B shows the open fix (PR #6106) restores caching (stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19). Also found independently: aborting a request whose LMCache lookup has finished but which vLLM has not scheduled yet leaks read locks for 300 s (known upstream, issue #5656); Phantom shrank it to a 7-event reproduction, and the open fix (PR #6540) removes it (2 and 3 leaked locks → 0) |
 
 Releases: [v0.1.0 – v0.5.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
 
@@ -647,6 +647,9 @@ phantom-kv/
 │   ├── pd_campaign.sh     # two engines: unmodified + every planted bug and fault
 │   ├── offload_campaign.sh # OffloadingConnector: every profile, planted fault, storage failures
 │   ├── lmcache_smoke.py   # Phantom in vLLM with an LMCache server as the KV store
+│   ├── lmcache_abort_probe.py # one aborted request at a chosen moment: LMCache locks left?
+│   ├── lmcache_lock_shrink.py # shrink a seed to the fewest events that leak LMCache locks
+│   ├── lmcache_lock_replay.py # replay the saved minimal lock-leak cases
 │   ├── vllm_phantom_hello.py  # does real vLLM load and run Phantom?
 │   ├── vllm_phantom_check.py  # end-to-end check: --pressure, --plant
 │   └── vllm_pd_check.py   # two engines (prefill + decode) via ExampleConnector

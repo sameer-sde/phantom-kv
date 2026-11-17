@@ -132,6 +132,9 @@ PROFILES: dict[str, dict] = {
     "lmcache": {"offload": "lmcache"},
     # vLLM's own prefix cache off: every reused prefix must come from LMCache
     "lmcache-only": {"offload": "lmcache", "gpu_prefix_cache": False},
+    # lmcache-only without client aborts: do read locks still outlive their requests?
+    "lmcache-only-noabort": {"offload": "lmcache", "gpu_prefix_cache": False,
+                             "abort_frac": 0.0},
     "lmcache-preempt": {"offload": "lmcache", "kv_blocks": 24, "max_num_seqs": 8},
     # ~1 MB of LMCache memory: LMCache-side eviction under load
     "lmcache-small": {"offload": "lmcache", "gpu_prefix_cache": False, "lmcache_l1_gb": 0.001},
@@ -430,6 +433,15 @@ class VllmRunner:
         sched = self._scheduler()
         return bool(sched is not None and sched.has_requests())
 
+    def _request_state(self, rid: str) -> str:
+        """vLLM's status for one of our requests (in-process only). vLLM adds a
+        suffix to request ids internally ("16" -> "16-8ed9017f")."""
+        sched = self._scheduler()
+        for key, req in (getattr(sched, "requests", None) or {}).items():
+            if key == rid or key.startswith(rid + "-"):
+                return req.status.name
+        return "UNKNOWN"
+
     def _scheduler(self):
         """vLLM's scheduler (in-process engine only), for tracing."""
         core = getattr(getattr(self.engine, "engine_core", None), "engine_core", None)
@@ -503,6 +515,7 @@ class VllmRunner:
         before = self.counters()
         mbefore = self.model_stats()
         obefore = self.offload_stats()
+        lstart = self.lmcache.l1_status() if self.lmcache is not None else None
         by_step: dict[int, list[Event]] = {}
         for ev in events:
             by_step.setdefault(ev.time, []).append(ev)
@@ -513,6 +526,7 @@ class VllmRunner:
         live: set[int] = set()
         finished: set[int] = set()
         aborted: set[int] = set()
+        abort_states: dict[str, int] = {}  # vLLM status of each request we aborted
         step = 0
         engine_error: str | None = None
         trace: list[tuple[str, str]] = []
@@ -537,6 +551,8 @@ class VllmRunner:
                         prompts[ev.rid] = ev.prompt
                         live.add(ev.rid)
                     elif ev.kind == "abort" and ev.rid in live:
+                        st = self._request_state(str(ev.rid))
+                        abort_states[st] = abort_states.get(st, 0) + 1
                         self.engine.abort_request([str(ev.rid)])
                         live.discard(ev.rid)
                         aborted.add(ev.rid)
@@ -619,15 +635,22 @@ class VllmRunner:
         oafter = self.offload_stats()
         for k, v in oafter.items():
             metrics["offload_" + k] = v - obefore.get(k, 0)
+        for st, n in abort_states.items():
+            metrics["aborts_in_" + st] = n
         if not reset_ok:
             self.resets_refused += 1  # this run was not isolated from the previous one
         if self.lmcache is not None and engine_error is None:
             # every request of this run has finished or been aborted: an ordinary
             # (non-forced) clear should leave nothing behind; what it cannot
             # remove is still locked by someone
+            pre = self.lmcache.l1_status()
             self.lmcache.clear()
-            left = self.lmcache.l1_objects()
-            metrics["lmcache_left_after_clear"] = -1 if left is None else left
+            post = self.lmcache.l1_status()
+            if pre is not None and post is not None and lstart is not None:
+                metrics["lmcache_read_locked_at_start"] = lstart["read_locked"]
+                for k in pre:
+                    metrics[f"lmcache_{k}_before_clear"] = pre[k]
+                    metrics[f"lmcache_{k}_after_clear"] = post[k]
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,

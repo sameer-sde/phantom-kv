@@ -1062,3 +1062,76 @@ still be rejected. On a current base they would be rejected, not hang.
 - A time limit on every trial: a hang is a result, not a stuck terminal.
 
 **Lead 2 (objects left locked between runs) is still open.**
+
+## Day 24 — 2026-11-17
+
+**The Day 22 replay differences are a LMCache read-lock leak, also known
+upstream, and Phantom confirms the open fix.**
+
+**1. Count the locks.** LMCache's `/status` endpoint reports, for its L1
+memory, `total_object_count`, `read_locked_count` and `write_locked_count`.
+The harness now reads it at the start of every run, after the run's last
+request is done, and after the clear. Once every request is done no one
+should hold a read lock, yet in `lmcache-only` seeds 4, 6, 7 and 9 left
+1 to 5 read-locked objects each. A normal clear skips locked objects, so
+they survived into the next run, and the seeds that differed on replay
+(6, 7, 9) were exactly the ones whose replay added new locks.
+
+**2. Aborts cause them.** Same workload with no client aborts
+(`lmcache-only-noabort`): 0 locks left, all 10 seeds identical on replay.
+
+**3. A single abort does not.** `scripts/lmcache_abort_probe.py` aborts one
+request that hits LMCache at a chosen moment (right after submit, waiting,
+loading, running): 0 locks left in every case, 3 runs each. Mistake of mine
+in that probe: the "waiting" case filled every seat first, so vLLM never
+even started the lookup and nothing was locked.
+
+**4. Let Phantom shrink it.** `scripts/lmcache_lock_shrink.py` runs the
+ddmin shrinker with "this run left read locks" as the failure test (a forced
+clear between candidates). Seed 9 went from 41 events to **7**, leaking 3
+locks on 5 of 5 re-runs; seed 6 from 41 to 10, leaking 2 on 5 of 5. Each
+minimal case is one request that hits chunks cached by earlier requests,
+some unrelated requests keeping the engine busy, and one abort. Saved in
+`tests/fixtures/lmcache_lock_leak_seed{6,9}.json`.
+
+**5. LMCache's view at the abort** (logged on replay):
+
+| | seed 6, req 11 | seed 9, req 2 |
+|---|---|---|
+| vLLM state | WAITING | WAITING |
+| connector state | PREFETCHING | PREFETCHING |
+| lookup | returned 64 tokens (2 chunks locked) | returned 96 tokens (3 chunks locked) |
+| hit consumed by the scheduler | no (0) | no (0) |
+| locks after abort, and when idle | 2 | 3 |
+
+The lookup finished and LMCache read-locked the chunks, but the request was
+still waiting, so vLLM had not consumed the result. On abort,
+`request_finished` drops the lookup on the vLLM side
+(`cleanup_lookup_result`) and ends the session, and neither releases the
+server's read locks. They expire only with the read TTL (300 s), and until
+then those objects cannot be cleared or evicted.
+
+**6. Known upstream.** LMCache issue #5656 (read locks stay held when a
+request is aborted before its retrieve); open fix PR #6540 (release the
+lookup read locks of a request aborted while waiting). Still unfixed on
+`dev` as of today.
+
+**7. A/B of the fix** (PR #6540 is based on `c619aa4`, newer than my
+install):
+
+| LMCache | minimal seed 6 | minimal seed 9 | 10 seeds, each run twice |
+|---|---|---|---|
+| `a4a6888` (installed) | 2, 2, 2 | 3, 3, 3 | 5 runs left locks, 3 seeds differ |
+| `c619aa4` (PR base) | 2, 2, 2 | 3, 3, 3 | 4 runs left locks, 3 seeds differ |
+| **PR #6540** (`27c050e`) | **0, 0, 0** | **0, 0, 0** | **0 runs left locks, 0 differ** |
+
+**Takeaways**
+- The Day 22 "nondeterminism" was a real resource leak, not harness noise.
+  Determinism checks find bugs that produce no wrong output.
+- A shrinker with a custom failure test turned a 41-event seed into a
+  7-event reproduction in 171 runs, with no guessing.
+- Phantom has now independently found two known, open LMCache bugs (the
+  restart and this lock leak), and gave independent evidence that both open
+  fixes work.
+
+All Day 22 leads are closed.

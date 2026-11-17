@@ -30,6 +30,12 @@ details are in the [devlog](docs/DEVLOG.md).
 - `lmcache-restart-settle` profile. The restart lead is a known LMCache bug
   (issue #4642), found independently; an A/B test of the open fix
   (PR #6106) shows caching recovers after every restart.
+- LMCache lock and object counts after every run (from `/status`),
+  `lmcache-only-noabort`, and three scripts: a one-abort probe, a lock-leak
+  shrinker (ddmin with a custom failure test) and a replayer for the saved
+  minimal cases. The Day 22 replay differences are a read-lock leak on
+  aborted waiting requests (known upstream, issue #5656); A/B of the open
+  fix (PR #6540): 0 leaked locks, all seeds identical on replay.
 
 ## v0.5.0 (Phase 4: two-engine prefill/decode with transfer faults)
 
