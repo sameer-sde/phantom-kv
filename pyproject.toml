@@ -1,15 +1,37 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "phantom-kv"
-version = "0.6.0"
+version = "0.6.1"
 description = "Deterministic simulation testing for LLM-serving KV caches"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Sameer Ahmed" }]
+keywords = ["llm", "kv-cache", "vllm", "lmcache", "testing", "fuzzing",
+            "deterministic-simulation", "prefix-caching", "inference"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/sameer-sde/phantom-kv"
+Repository = "https://github.com/sameer-sde/phantom-kv"
+Changelog = "https://github.com/sameer-sde/phantom-kv/blob/main/CHANGELOG.md"
+Blog = "https://github.com/sameer-sde/phantom-kv/blob/main/docs/blog/phantom.md"
+Issues = "https://github.com/sameer-sde/phantom-kv/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/ci.yml)
 [![real-vllm](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml/badge.svg)](https://github.com/sameer-sde/phantom-kv/actions/workflows/vllm.yml)
+[![PyPI](https://img.shields.io/pypi/v/phantom-kv)](https://pypi.org/project/phantom-kv/)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)](#quick-start)
 [![Tests](https://img.shields.io/badge/tests-36%20passing-success)](#testing)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/sameer-sde/phantom-kv/blob/main/LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
 corruption** in LLM inference engines such as vLLM, SGLang and LMCache.
@@ -14,7 +15,7 @@ It does this **exactly** (hash equality, not floating-point comparison),
 seed replays the entire run, event for event, and failures shrink automatically
 to a handful of events).
 
-**Blog post:** [A model with no weights found two real bugs in LMCache](docs/blog/phantom.md)
+**Blog post:** [A model with no weights found two real bugs in LMCache](https://github.com/sameer-sde/phantom-kv/blob/main/docs/blog/phantom.md)
 (how Phantom works, and the two LMCache bugs it found independently).
 
 > Phantom is a model with no weights. To the serving engine it looks like a
@@ -256,7 +257,7 @@ RESULT: PASS
 8 prompts with long shared prefixes, generated twice: vLLM served 608 of
 1,356 positions from its prefix cache, and every one of 19,776 slot reads was
 correct. No GPU, no model weights. How it plugs in:
-[docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md).
+[docs/VLLM_INTEGRATION.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/VLLM_INTEGRATION.md).
 
 ### Catching a bug planted inside real vLLM
 
@@ -300,7 +301,7 @@ first blocks of earlier prompts after the cache has churned, which is exactly wh
 a stale cache entry does damage. ~190 requests/s on one CPU core. Along the way Phantom raised one false alarm
 on unmodified vLLM; it was traced to Phantom (vLLM caches blocks at schedule
 time, so the model must write the whole batch before checking, like real
-attention) and fixed. See the [devlog](docs/DEVLOG.md#day-7--2026-11-02).
+attention) and fixed. See the [devlog](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DEVLOG.md#day-7--2026-11-02).
 
 ### Shrinking a real-vLLM failure
 
@@ -356,7 +357,7 @@ Two things the counters and determinism checks exposed along the way: vLLM's
 CPU platform silently disables async scheduling (so that profile was dropped),
 and the multiprocess engine let aborts arrive a step late. The harness now
 runs the engine in-process so every add, abort and step is exact. Details in
-the [devlog](docs/DEVLOG.md#day-10--2026-11-03).
+the [devlog](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DEVLOG.md#day-10--2026-11-03).
 
 
 ### Phase 4: two vLLM engines, KV transferred between them
@@ -455,7 +456,7 @@ A swapped context is a *valid chain for the wrong prompt*: every slot extends
 the one before it, so the in-model check can't see it, but the output check
 against the true prompt does. An empty slot is caught in-model on the first
 read. Two independent oracles, each catching what the other can't. All of these
-runs are part of CI. Design: [docs/PD_DESIGN.md](docs/PD_DESIGN.md).
+runs are part of CI. Design: [docs/PD_DESIGN.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/PD_DESIGN.md).
 
 ### Phase 5: hunting in vLLM code nobody planted bugs in
 
@@ -474,8 +475,8 @@ code is patched at all.
 
 | Target | vLLM code under test | Design |
 |---|---|---|
-| 1. `SimpleCPUOffloadConnector` | ~1,500-line scheduler-side manager | [OFFLOAD_DESIGN.md](docs/OFFLOAD_DESIGN.md) |
-| 2. `OffloadingConnector` | ~2,600-line scheduler + `CPUOffloadingManager` | [OFFLOAD2_DESIGN.md](docs/OFFLOAD2_DESIGN.md) |
+| 1. `SimpleCPUOffloadConnector` | ~1,500-line scheduler-side manager | [OFFLOAD_DESIGN.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD_DESIGN.md) |
+| 2. `OffloadingConnector` | ~2,600-line scheduler + `CPUOffloadingManager` | [OFFLOAD2_DESIGN.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD2_DESIGN.md) |
 
 **Target 2 campaign, 50 seeds per run** (`bash scripts/offload_campaign.sh`):
 
@@ -521,6 +522,13 @@ had stopped stepping while vLLM had pending work. Fixed by stepping while
 - No third-party dependencies (pytest for tests)
 
 ### Install
+
+```bash
+pip install phantom-kv
+phantomkv fuzz --seeds 1000 --plant abort-free-race
+```
+
+To work on Phantom itself, or to run the real-vLLM and LMCache scripts:
 
 ```bash
 git clone https://github.com/sameer-sde/phantom-kv.git
@@ -586,7 +594,7 @@ CI runs on every push:
 
 * **`ci`**: the test suite on Python 3.10 and 3.12, plus a 1,000-seed clean fuzz of the simulator.
 * **`real-vllm`**: installs vLLM's Linux CPU wheel (pinned) and runs
-  [`scripts/ci_vllm.sh`](scripts/ci_vllm.sh). Unmodified vLLM must pass every check
+  [`scripts/ci_vllm.sh`](https://github.com/sameer-sde/phantom-kv/blob/main/scripts/ci_vllm.sh). Unmodified vLLM must pass every check
   (no false positives), and with a bug planted in vLLM's block pool the checks
   must fail (no false negatives).
 
@@ -601,11 +609,11 @@ CI runs on every push:
 | 2. Phantom as an out-of-tree **vLLM** model on the CPU backend, writing tags through vLLM's real block tables and slot mappings | ✅ done: runs inside real vLLM, planted bug caught (15/20 seeds), seeded step-by-step fuzzing + shrinking, real-vLLM checks in CI on every push |
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
-| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ✅ v0.6.0: vLLM's `SimpleCPUOffloadConnector` ([design](docs/OFFLOAD_DESIGN.md)) and `OffloadingConnector` ([design](docs/OFFLOAD2_DESIGN.md)), each with its own code unmodified: clean, planted faults caught, failed loads/stores recovered, in CI. LMCache (CPU-only server): planted bug caught 10/10, and two real open bugs found independently: a fast server restart is never noticed by vLLM (issue #4642) and aborting a request whose lookup finished before it was scheduled leaks read locks for 300 s (issue #5656, shrunk to 7 events). Phantom's A/B tests show both open fixes work (PR #6106: stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19; PR #6540: leaked locks 2 and 3 → 0). Not covered: SGLang, llm-d, NIXL (need GPUs); no new issues filed, both bugs were already reported |
+| 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ✅ v0.6.0: vLLM's `SimpleCPUOffloadConnector` ([design](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD_DESIGN.md)) and `OffloadingConnector` ([design](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD2_DESIGN.md)), each with its own code unmodified: clean, planted faults caught, failed loads/stores recovered, in CI. LMCache (CPU-only server): planted bug caught 10/10, and two real open bugs found independently: a fast server restart is never noticed by vLLM (issue #4642) and aborting a request whose lookup finished before it was scheduled leaks read locks for 300 s (issue #5656, shrunk to 7 events). Phantom's A/B tests show both open fixes work (PR #6106: stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19; PR #6540: leaked locks 2 and 3 → 0). Not covered: SGLang, llm-d, NIXL (need GPUs); no new issues filed, both bugs were already reported |
 
-Releases: [v0.1.0 – v0.6.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](CHANGELOG.md)).
+Releases: [v0.1.0 – v0.6.1](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](https://github.com/sameer-sde/phantom-kv/blob/main/CHANGELOG.md)).
 
-Details: [docs/ROADMAP.md](docs/ROADMAP.md) · design: [docs/DESIGN.md](docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](docs/DEVLOG.md)
+Details: [docs/ROADMAP.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/ROADMAP.md) · design: [docs/DESIGN.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DEVLOG.md)
 
 ---
 
@@ -660,6 +668,7 @@ phantom-kv/
 ├── CHANGELOG.md           # what each release (phase) added
 ├── .github/workflows/
 │   ├── ci.yml             # unit tests + simulator fuzz
+│   ├── publish.yml        # GitHub release -> PyPI (Trusted Publishing)
 │   └── vllm.yml           # Phantom inside real vLLM (pinned CPU wheel)
 └── pyproject.toml
 ```
@@ -690,4 +699,4 @@ Related work: [vLLM PR #54832](https://github.com/vllm-project/vllm/pull/54832) 
 [Sentinel](https://github.com/sameer-sde/sentinel) ·
 [Vektr](https://github.com/sameer-sde/vektr)
 
-License: [MIT](LICENSE)
+License: [MIT](https://github.com/sameer-sde/phantom-kv/blob/main/LICENSE)
