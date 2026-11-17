@@ -625,9 +625,13 @@ class VllmRunner:
             # every request of this run has finished or been aborted: an ordinary
             # (non-forced) clear should leave nothing behind; what it cannot
             # remove is still locked by someone
+            pre = self.lmcache.l1_status()
             self.lmcache.clear()
-            left = self.lmcache.l1_objects()
-            metrics["lmcache_left_after_clear"] = -1 if left is None else left
+            post = self.lmcache.l1_status()
+            if pre is not None and post is not None:
+                for k in pre:
+                    metrics[f"lmcache_{k}_before_clear"] = pre[k]
+                    metrics[f"lmcache_{k}_after_clear"] = post[k]
         return VllmResult(seed, step, len(finished), len(aborted), mismatches,
                           self._violations_since(offset),
                           liveness=bool(live) and engine_error is None, outputs=outputs,

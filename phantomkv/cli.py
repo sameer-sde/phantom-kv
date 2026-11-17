@@ -70,6 +70,23 @@ def _shrink(a: argparse.Namespace) -> int:
     return 1
 
 
+def _report_lmcache_locks(seed: int, label: str, res) -> None:
+    """After a run every request is done, so LMCache should hold no locks, and an
+    ordinary clear should empty it. Print the seed when that is not the case."""
+    m = res.metrics
+    if "lmcache_objects_after_clear" not in m:
+        return
+    held = (m["lmcache_read_locked_before_clear"] + m["lmcache_write_locked_before_clear"]
+            + m["lmcache_objects_after_clear"])
+    if held:
+        print(f"seed {seed}{label}: LMCache after all requests done: "
+              f"read-locked {m['lmcache_read_locked_before_clear']}, "
+              f"write-locked {m['lmcache_write_locked_before_clear']} "
+              f"(of {m['lmcache_objects_before_clear']} objects); "
+              f"left after clear {m['lmcache_objects_after_clear']} "
+              f"(read-locked {m['lmcache_read_locked_after_clear']})")
+
+
 def _vllm_fuzz(a: argparse.Namespace) -> int:
     from .vllm_harness import VllmRunner, profile_config  # needs the vLLM environment
 
@@ -93,8 +110,10 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 totals[k] = max(totals.get(k, 0), val)
             else:
                 totals[k] = totals.get(k, 0) + val
+        _report_lmcache_locks(seed, "", res)
         if a.check_determinism:
             again = runner.run(seed)
+            _report_lmcache_locks(seed, " (replay)", again)
             if again.fingerprint != res.fingerprint:
                 print(f"seed {seed}: NONDETERMINISTIC (two runs differ: steps "
                       f"{res.steps} vs {again.steps}, outputs "
@@ -102,10 +121,6 @@ def _vllm_fuzz(a: argparse.Namespace) -> int:
                 nondeterministic += 1
                 failing.append(res)
                 continue
-        left = res.metrics.get("lmcache_left_after_clear", 0)
-        if left > 0:
-            print(f"seed {seed}: {left} LMCache objects survived a clear after all of "
-                  "this seed's requests were done")
         if not res.ok:
             failing.append(res)
             for k, n in res.kinds.items():

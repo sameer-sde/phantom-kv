@@ -94,23 +94,20 @@ class LMCacheServer:
         except Exception:
             return False
 
-    def l1_objects(self) -> int | None:
-        """Objects resident in LMCache's L1 (None if the listing is unavailable)."""
-        total, token = 0, None
-        for _ in range(100):
-            url = f"http://127.0.0.1:{self.http_port}/cache/objects?tier=l1&page_size=1000"
-            if token:
-                url += f"&page_token={token}"
-            try:
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    page = json.load(r)
-            except Exception:
-                return None
-            total += len(page.get("entries") or [])
-            token = page.get("next_page_token")
-            if not token:
-                return total
-        return total
+    def l1_status(self) -> dict[str, int] | None:
+        """Object and lock counts in LMCache's L1, from its /status endpoint
+        (None if unavailable). read_locked: objects a reader still holds;
+        write_locked: reservations for stores that have not finished."""
+        url = f"http://127.0.0.1:{self.http_port}/status"
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                st = json.load(r)
+            l1 = st["storage_manager"]["l1_manager"]
+            return {"objects": int(l1["total_object_count"]),
+                    "read_locked": int(l1["read_locked_count"]),
+                    "write_locked": int(l1["write_locked_count"])}
+        except Exception:
+            return None
 
     def counts(self) -> dict[str, int]:
         """Stores and retrievals the server has logged so far."""
