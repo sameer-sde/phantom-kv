@@ -5,7 +5,8 @@ case runs 3 times; a forced clear between runs empties LMCache, locked objects
 included. Prints the read locks each run left behind (0 = no leak).
 
 Run in the vLLM + LMCache env:
-    python scripts/lmcache_lock_replay.py lmcache_lock_leak_seed6.json lmcache_lock_leak_seed9.json
+    python scripts/lmcache_lock_replay.py tests/fixtures/lmcache_lock_leak_seed6.json \\
+        tests/fixtures/lmcache_lock_leak_seed9.json
 """
 
 from __future__ import annotations
@@ -30,3 +31,4 @@ for path in sys.argv[1:]:
         left.append(m["lmcache_read_locked_before_clear"] - m["lmcache_read_locked_at_start"])
     print(f"LOCKS {os.path.basename(path)}: read locks left on 3 runs {left}", flush=True)
 runner.lmcache.stop()
+os._exit(0)  # vLLM's engine shutdown can hang at interpreter exit; results are printed
