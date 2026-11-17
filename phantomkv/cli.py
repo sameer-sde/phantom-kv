@@ -78,8 +78,10 @@ def _report_lmcache_locks(seed: int, label: str, res) -> None:
     if "lmcache_read_locked_at_start" not in m:
         return
     new = m["lmcache_read_locked_before_clear"] - m["lmcache_read_locked_at_start"]
-    if new or m.get("aborts_while_waiting"):
-        print(f"seed {seed}{label}: aborted while waiting {m.get('aborts_while_waiting', 0)}; "
+    aborts = ", ".join(f"{k[len('aborts_in_'):]} {v}" for k, v in sorted(m.items())
+                       if k.startswith("aborts_in_")) or "none"
+    if new or aborts != "none":
+        print(f"seed {seed}{label}: aborted ({aborts}); "
               f"read locks left by this run {new} "
               f"(held in total {m['lmcache_read_locked_before_clear']}, "
               f"write-locked {m['lmcache_write_locked_before_clear']}); "

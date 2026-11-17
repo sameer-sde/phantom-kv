@@ -433,11 +433,14 @@ class VllmRunner:
         sched = self._scheduler()
         return bool(sched is not None and sched.has_requests())
 
-    def _still_waiting(self, rid: str) -> bool:
-        """True if vLLM has not scheduled this request yet (in-process only)."""
+    def _request_state(self, rid: str) -> str:
+        """vLLM's status for one of our requests (in-process only). vLLM adds a
+        suffix to request ids internally ("16" -> "16-8ed9017f")."""
         sched = self._scheduler()
-        req = getattr(sched, "requests", {}).get(rid) if sched is not None else None
-        return req is not None and req.status.name.startswith("WAITING")
+        for key, req in (getattr(sched, "requests", None) or {}).items():
+            if key == rid or key.startswith(rid + "-"):
+                return req.status.name
+        return "UNKNOWN"
 
     def _scheduler(self):
         """vLLM's scheduler (in-process engine only), for tracing."""
@@ -523,7 +526,7 @@ class VllmRunner:
         live: set[int] = set()
         finished: set[int] = set()
         aborted: set[int] = set()
-        aborted_waiting = 0
+        abort_states: dict[str, int] = {}  # vLLM status of each request we aborted
         step = 0
         engine_error: str | None = None
         trace: list[tuple[str, str]] = []
@@ -548,8 +551,8 @@ class VllmRunner:
                         prompts[ev.rid] = ev.prompt
                         live.add(ev.rid)
                     elif ev.kind == "abort" and ev.rid in live:
-                        if self._still_waiting(str(ev.rid)):
-                            aborted_waiting += 1  # never scheduled
+                        st = self._request_state(str(ev.rid))
+                        abort_states[st] = abort_states.get(st, 0) + 1
                         self.engine.abort_request([str(ev.rid)])
                         live.discard(ev.rid)
                         aborted.add(ev.rid)
@@ -632,7 +635,8 @@ class VllmRunner:
         oafter = self.offload_stats()
         for k, v in oafter.items():
             metrics["offload_" + k] = v - obefore.get(k, 0)
-        metrics["aborts_while_waiting"] = aborted_waiting
+        for st, n in abort_states.items():
+            metrics["aborts_in_" + st] = n
         if not reset_ok:
             self.resets_refused += 1  # this run was not isolated from the previous one
         if self.lmcache is not None and engine_error is None:
