@@ -3,6 +3,16 @@
 Each release marks a finished phase of the [roadmap](docs/ROADMAP.md). Day-by-day
 details are in the [devlog](docs/DEVLOG.md).
 
+## v0.6.1 (first PyPI release)
+
+- On PyPI: `pip install phantom-kv`, then `phantomkv fuzz ...`. No
+  dependencies.
+- Published from GitHub Actions with PyPI Trusted Publishing (no stored
+  token) when a GitHub release is created; the workflow checks that the
+  version matches the tag, runs the tests and `twine check` first.
+- Package metadata (keywords, classifiers, project links); README links are
+  absolute so they work on the PyPI page.
+
 ## v0.6.0 (Phase 5: bug hunting on vLLM offloading and LMCache)
 
 Three targets, each run with its own code unmodified. vLLM's two CPU
