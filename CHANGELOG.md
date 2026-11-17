@@ -3,7 +3,15 @@
 Each release marks a finished phase of the [roadmap](docs/ROADMAP.md). Day-by-day
 details are in the [devlog](docs/DEVLOG.md).
 
-## Unreleased (Phase 5: bug hunting)
+## v0.6.0 (Phase 5: bug hunting on vLLM offloading and LMCache)
+
+Three targets, each run with its own code unmodified. vLLM's two CPU
+offloading connectors: clean, planted faults caught, storage failures
+recovered. LMCache: two real, open bugs found independently and shrunk to
+minimal reproductions (both already reported upstream, so no duplicates
+filed); Phantom's A/B tests show both open fixes work. SGLang, llm-d and
+the NIXL fault classes were not covered (they need GPUs).
+
 
 - vLLM's `SimpleCPUOffloadConnector` on the CPU backend: its manager runs
   unmodified, only the CUDA copy engine is replaced. Six `vllm-fuzz`
