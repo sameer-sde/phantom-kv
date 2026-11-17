@@ -1135,3 +1135,25 @@ install):
   fixes work.
 
 All Day 22 leads are closed.
+
+## Day 25 — 2026-11-17
+
+**Phase 5 released, evidence posted upstream, Phase 6 started.**
+
+- **v0.6.0** released (Pull Request #12): Phase 5 marked done in the README,
+  ROADMAP and CHANGELOG, including what was not covered (SGLang, llm-d,
+  NIXL: they need GPUs) and that no new issues were filed because both
+  LMCache bugs were already reported.
+- **A/B results posted on LMCache's fix PRs**, with AI assistance
+  disclosed as LMCache's contribution rules ask:
+  [PR #6106](https://github.com/LMCache/LMCache/pull/6106#issuecomment-6950649098)
+  (fast restart: stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19)
+  and [PR #6540](https://github.com/LMCache/LMCache/pull/6540#issuecomment-6950628749)
+  (lock leak: 2 and 3 leaked locks → 0; replay differences 3 → 0).
+  Before posting I re-checked that PR #6106's head was still the commit I
+  had tested.
+- **Blog post** ([docs/blog/phantom.md](blog/phantom.md)): how Phantom works
+  and what it found, about 1,900 words. It says upfront that both LMCache
+  bugs were already reported; an earlier draft only said so halfway
+  through, which read as a bigger claim than the evidence supports. The
+  "Try it" commands were run before publishing.

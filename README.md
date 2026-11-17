@@ -14,6 +14,9 @@ It does this **exactly** (hash equality, not floating-point comparison),
 seed replays the entire run, event for event, and failures shrink automatically
 to a handful of events).
 
+**Blog post:** [A model with no weights found two real bugs in LMCache](docs/blog/phantom.md)
+(how Phantom works, and the two LMCache bugs it found independently).
+
 > Phantom is a model with no weights. To the serving engine it looks like a
 > real LLM: it is scheduled, batched, preempted, prefix-cached, and its KV
 > cache is shipped between machines. But instead of K/V vectors it writes a
@@ -639,6 +642,7 @@ phantom-kv/
 │   ├── OFFLOAD_DESIGN.md  # phase 5 target 1: vLLM's CPU KV offloading
 │   ├── OFFLOAD2_DESIGN.md # phase 5 target 2: vLLM's OffloadingConnector
 │   ├── ROADMAP.md         # phases and exit criteria
+│   ├── blog/phantom.md    # blog post: how Phantom works and what it found
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
