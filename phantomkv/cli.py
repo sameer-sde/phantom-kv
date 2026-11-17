@@ -71,20 +71,19 @@ def _shrink(a: argparse.Namespace) -> int:
 
 
 def _report_lmcache_locks(seed: int, label: str, res) -> None:
-    """After a run every request is done, so LMCache should hold no locks, and an
-    ordinary clear should empty it. Print the seed when that is not the case."""
+    """After a run every request is done, so LMCache should hold no read locks.
+    Print the seed when this run left new ones (locks survive clears, so the
+    count at the start of the run is subtracted)."""
     m = res.metrics
-    if "lmcache_objects_after_clear" not in m:
+    if "lmcache_read_locked_at_start" not in m:
         return
-    held = (m["lmcache_read_locked_before_clear"] + m["lmcache_write_locked_before_clear"]
-            + m["lmcache_objects_after_clear"])
-    if held:
-        print(f"seed {seed}{label}: LMCache after all requests done: "
-              f"read-locked {m['lmcache_read_locked_before_clear']}, "
-              f"write-locked {m['lmcache_write_locked_before_clear']} "
-              f"(of {m['lmcache_objects_before_clear']} objects); "
-              f"left after clear {m['lmcache_objects_after_clear']} "
-              f"(read-locked {m['lmcache_read_locked_after_clear']})")
+    new = m["lmcache_read_locked_before_clear"] - m["lmcache_read_locked_at_start"]
+    if new or m.get("aborts_while_waiting"):
+        print(f"seed {seed}{label}: aborted while waiting {m.get('aborts_while_waiting', 0)}; "
+              f"read locks left by this run {new} "
+              f"(held in total {m['lmcache_read_locked_before_clear']}, "
+              f"write-locked {m['lmcache_write_locked_before_clear']}); "
+              f"left after clear {m['lmcache_objects_after_clear']}")
 
 
 def _vllm_fuzz(a: argparse.Namespace) -> int:
@@ -396,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
                         "offload2, offload2-chunk2, offload2-slow-stores, offload2-preempt, "
                         "offload2-small, offload2-sync, offload2-chunk2-revisit, "
                         "offload2-chunk3-revisit, lmcache, lmcache-only, lmcache-preempt, "
-                        "lmcache-small, lmcache-restart, lmcache-restart-slow, lmcache-restart-settle")
+                        "lmcache-small, lmcache-restart, lmcache-restart-slow, lmcache-restart-settle, lmcache-only-noabort")
     v.add_argument("--check-determinism", action="store_true",
                    help="run every seed twice and require identical results")
     v.add_argument("-v", "--verbose", action="store_true")
