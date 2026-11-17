@@ -11,6 +11,8 @@ Run in the vLLM + LMCache env:  python scripts/lmcache_lock_shrink.py 6 9
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import os
 import sys
 
@@ -50,6 +52,38 @@ def describe(events) -> None:
               + (f"; shares chunks: {', '.join(shares)}" if shares else ""))
 
 
+def explain(seed: int, events) -> None:
+    """Re-run the minimal events once, logging LMCache's view of each aborted
+    request at the moment of the abort."""
+    engine = runner.engine
+    real_abort = engine.abort_request
+
+    def logged_abort(ids, *args, **kwargs):
+        for rid in ids:
+            sched = runner._scheduler()
+            conn = getattr(sched, "connector", None)
+            key = next((k for k in (getattr(sched, "requests", None) or {})
+                        if k == rid or k.startswith(rid + "-")), None)
+            tracker = (getattr(conn, "request_trackers", None) or {}).get(key)
+            lookups = getattr(getattr(conn, "scheduler_adapter", None), "_lookups", None) or {}
+            lk = lookups.get(key)
+            print(f"    at abort of req {rid}: vLLM state {runner._request_state(rid)}, "
+                  f"connector state {getattr(getattr(tracker, 'state', None), 'name', None)}, "
+                  f"LMCache hit tokens {getattr(tracker, 'num_lmcache_hit_tokens', None)}, "
+                  f"lookup {'none' if lk is None else 'pending' if getattr(lk, '_result', None) is None else 'returned ' + str(lk._result)}, "
+                  f"read-locked before {runner.lmcache.l1_status()['read_locked']}")
+        out = real_abort(ids, *args, **kwargs)
+        runner._settle_lmcache()
+        print(f"    read-locked right after the abort {runner.lmcache.l1_status()['read_locked']}")
+        return out
+
+    engine.abort_request = logged_abort
+    try:
+        print(f"    replay with logging: {new_locks(seed, events)} read locks left behind")
+    finally:
+        engine.abort_request = real_abort
+
+
 for seed in [int(s) for s in sys.argv[1:]] or [6]:
     events = vllm_workload(seed, runner.cfg)
     first = new_locks(seed, events)
@@ -69,4 +103,9 @@ for seed in [int(s) for s in sys.argv[1:]] or [6]:
     print(f"    shrunk to {len(minimal)} events in {runs} runs; "
           f"locks left on 5 re-runs: {again}")
     describe(minimal)
+    out = f"lmcache_lock_leak_seed{seed}.json"
+    with open(out, "w") as f:
+        json.dump([dataclasses.asdict(e) for e in minimal], f)
+    print(f"    minimal events saved to {out}")
+    explain(seed, minimal)
 runner.lmcache.stop()
