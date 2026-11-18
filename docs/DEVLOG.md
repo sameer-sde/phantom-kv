@@ -1189,3 +1189,32 @@ limitations and related work. Every number is taken from this devlog and the
 README; every reference was checked to exist (LMCache's paper is
 arXiv:2510.09665, FoundationDB's is SIGMOD 2021). The limitations section
 states what was not covered: GPU-only paths, SGLang, numerics.
+
+## Day 28 — 2026-11-18
+
+**v0.7.0: all six phases done.**
+
+- **PyPI page:** PyPI does not render Mermaid, so the package now uses a
+  short description written for PyPI (`docs/pypi.md`): what Phantom is,
+  three commands to try, the results, and links back to the repository for
+  the diagrams.
+- **README:** a "Results at a glance" table at the top, so the outcome is
+  visible without scrolling, and the opening line now names only the engines
+  actually tested (vLLM and LMCache; it used to list SGLang too, which was
+  never run).
+- **CI:** all three workflows moved to current action majors (checkout v7,
+  setup-python v7, upload-artifact v7, download-artifact v8, setup-uv v7),
+  all on Node 24. I checked each action's inputs and defaults first, because
+  the publish workflow runs only at release time.
+- **ROADMAP:** every phase marked with what it delivered. Phase 6 says
+  plainly that the paper is in the repository but not yet on arXiv or Zenodo,
+  and that there was no meetup talk.
+
+**The whole project:** about three months of planning and research before
+the first commit, then 18 days of building (1–18 November 2026): a
+provenance oracle and deterministic simulator, Phantom
+inside unmodified vLLM, two-engine disaggregation with transfer faults,
+campaigns on vLLM's two offloading systems and on LMCache, two real LMCache
+bugs found independently with A/B evidence posted on their fixes, a blog
+post, a paper, and a package on PyPI, with every change through a pull
+request and CI.

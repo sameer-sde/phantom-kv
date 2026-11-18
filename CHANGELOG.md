@@ -3,6 +3,21 @@
 Each release marks a finished phase of the [roadmap](docs/ROADMAP.md). Day-by-day
 details are in the [devlog](docs/DEVLOG.md).
 
+## v0.7.0 (Phase 6: published; the project is complete)
+
+All six phases of the roadmap are done.
+
+- **Paper** (PDF and LaTeX source in `docs/paper/`): the method, the
+  evaluation with planted and unplanted results kept separate, the two
+  LMCache case studies, limitations and related work.
+- **Blog post** (`docs/blog/phantom.md`).
+- **PyPI page** now uses a short description written for PyPI
+  (`docs/pypi.md`); the README's Mermaid diagrams showed as code there.
+- README: a "Results at a glance" table at the top; the opening line now
+  names only the engines actually tested (vLLM and LMCache).
+- CI and the publish workflow moved to current action versions (Node 24),
+  which removes GitHub's Node 20 deprecation warnings.
+
 ## v0.6.1 (first PyPI release)
 
 - On PyPI: `pip install phantom-kv`, then `phantomkv fuzz ...`. No

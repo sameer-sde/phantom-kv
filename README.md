@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/sameer-sde/phantom-kv/blob/main/LICENSE)
 
 A testing framework that finds **cross-request data leaks and KV-cache
-corruption** in LLM inference engines such as vLLM, SGLang and LMCache.
+corruption** in LLM inference engines, tested so far on vLLM and LMCache.
 It does this **exactly** (hash equality, not floating-point comparison),
 **on a laptop CPU** (no GPU, no model weights), and **reproducibly** (one
 seed replays the entire run, event for event, and failures shrink automatically
@@ -25,6 +25,17 @@ to a handful of events).
 > cache is shipped between machines. But instead of K/V vectors it writes a
 > **provenance tag** into every cache slot, so any slot read by the wrong
 > request is caught and the request that wrote it is named.
+
+## Results at a glance
+
+| | |
+|---|---|
+| **Real bugs** | 2 in LMCache, found independently: a fast server restart is never noticed by vLLM, and aborted requests leak read locks for 300 s. Both were already reported upstream; Phantom's A/B tests show both open fixes work ([#6106](https://github.com/LMCache/LMCache/pull/6106#issuecomment-6950649098), [#6540](https://github.com/LMCache/LMCache/pull/6540#issuecomment-6950628749)). |
+| **Planted bugs** | Caught in every class tried: vLLM's block pool (15–20/20 seeds), transfers between two vLLM engines (115–199/200), LMCache's scatter code (10/10). |
+| **False alarms** | 0 on unmodified vLLM and LMCache, and every seed replays identically (one early false alarm was a harness bug, traced and fixed). |
+| **Unplanted code** | vLLM's two CPU offloading systems: no bugs found; 21,181 blocks stored and 2,243 loaded back, all verified. |
+| **Shrinking** | Failures reduced to 2–13 events (the LMCache lock leak: 41 → 7). |
+| **Install** | `pip install phantom-kv`: zero dependencies, about 300 simulator seeds/s on one laptop core, no GPU. |
 
 ---
 
@@ -612,8 +623,9 @@ CI runs on every push:
 | 3. More chaos on real vLLM: chunked prefill, preemption, block sizes | ✅ 4 profiles clean on unmodified vLLM, `stale-prefix-cache` caught in each, chunking/preemption proven by counters; refcount bugs shown to be caught by vLLM's own assertions |
 | 4. Two-engine PD disaggregation with transfer faults (swap, drop, duplicate, abort mid-transfer) | ✅ v0.5.0: SGLang Oct-2026 class reproduced and caught; seeded PD fuzzing + shrinking; 200-seed campaign 0 false positives, every planted bug and fault caught; all in CI |
 | 5. Bug-hunting campaigns on vLLM, SGLang, LMCache, llm-d; issues and fix PRs upstream | ✅ v0.6.0: vLLM's `SimpleCPUOffloadConnector` ([design](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD_DESIGN.md)) and `OffloadingConnector` ([design](https://github.com/sameer-sde/phantom-kv/blob/main/docs/OFFLOAD2_DESIGN.md)), each with its own code unmodified: clean, planted faults caught, failed loads/stores recovered, in CI. LMCache (CPU-only server): planted bug caught 10/10, and two real open bugs found independently: a fast server restart is never noticed by vLLM (issue #4642) and aborting a request whose lookup finished before it was scheduled leaks read locks for 300 s (issue #5656, shrunk to 7 events). Phantom's A/B tests show both open fixes work (PR #6106: stores per server lifetime 19, 0, 0, 0 → 19, 20, 21, 19; PR #6540: leaked locks 2 and 3 → 0). Not covered: SGLang, llm-d, NIXL (need GPUs); no new issues filed, both bugs were already reported |
+| 6. Publish: paper, blog, package | ✅ v0.7.0: [paper](https://github.com/sameer-sde/phantom-kv/blob/main/docs/paper/phantom.pdf), [blog post](https://github.com/sameer-sde/phantom-kv/blob/main/docs/blog/phantom.md), `pip install phantom-kv` (published from GitHub releases with Trusted Publishing) |
 
-Releases: [v0.1.0 – v0.6.1](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](https://github.com/sameer-sde/phantom-kv/blob/main/CHANGELOG.md)).
+Releases: [v0.1.0 – v0.7.0](https://github.com/sameer-sde/phantom-kv/releases), one per finished phase ([CHANGELOG](https://github.com/sameer-sde/phantom-kv/blob/main/CHANGELOG.md)).
 
 Details: [docs/ROADMAP.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/ROADMAP.md) · design: [docs/DESIGN.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DESIGN.md) · vLLM integration: [docs/VLLM_INTEGRATION.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/VLLM_INTEGRATION.md) · daily progress: [docs/DEVLOG.md](https://github.com/sameer-sde/phantom-kv/blob/main/docs/DEVLOG.md)
 
