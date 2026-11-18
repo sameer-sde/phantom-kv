@@ -18,7 +18,7 @@ to a handful of events).
 **Blog post:** [A model with no weights found two real bugs in LMCache](https://github.com/sameer-sde/phantom-kv/blob/main/docs/blog/phantom.md)
 (how Phantom works, and the two LMCache bugs it found independently).
 
-**Paper (5 pages, PDF):** [Phantom: Exact, Deterministic Testing of LLM-Serving KV Caches without GPUs or Model Weights](https://github.com/sameer-sde/phantom-kv/blob/main/docs/paper/phantom.pdf).
+**Paper (PDF):** [Phantom: Exact, Deterministic Testing of LLM-Serving KV Caches without GPUs or Model Weights](https://github.com/sameer-sde/phantom-kv/blob/main/docs/paper/phantom.pdf).
 
 > Phantom is a model with no weights. To the serving engine it looks like a
 > real LLM: it is scheduled, batched, preempted, prefix-cached, and its KV

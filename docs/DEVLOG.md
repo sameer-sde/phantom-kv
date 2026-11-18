@@ -1181,7 +1181,7 @@ All Day 22 leads are closed.
 
 ## Day 27 — 2026-11-18
 
-**Paper: [docs/paper/phantom.pdf](paper/phantom.pdf)** (5 pages; LaTeX
+**Paper: [docs/paper/phantom.pdf](paper/phantom.pdf)** (LaTeX
 source alongside). The method (provenance oracle, deterministic execution,
 shrinking, running inside unmodified engines), the evaluation with planted
 and unplanted results kept separate, the two LMCache case studies, lessons,
