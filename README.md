@@ -18,6 +18,8 @@ to a handful of events).
 **Blog post:** [A model with no weights found two real bugs in LMCache](https://github.com/sameer-sde/phantom-kv/blob/main/docs/blog/phantom.md)
 (how Phantom works, and the two LMCache bugs it found independently).
 
+**Paper (5 pages, PDF):** [Phantom: Exact, Deterministic Testing of LLM-Serving KV Caches without GPUs or Model Weights](https://github.com/sameer-sde/phantom-kv/blob/main/docs/paper/phantom.pdf).
+
 > Phantom is a model with no weights. To the serving engine it looks like a
 > real LLM: it is scheduled, batched, preempted, prefix-cached, and its KV
 > cache is shipped between machines. But instead of K/V vectors it writes a
@@ -651,6 +653,7 @@ phantom-kv/
 │   ├── OFFLOAD2_DESIGN.md # phase 5 target 2: vLLM's OffloadingConnector
 │   ├── ROADMAP.md         # phases and exit criteria
 │   ├── blog/phantom.md    # blog post: how Phantom works and what it found
+│   ├── paper/             # technical paper: phantom.tex + phantom.pdf
 │   └── DEVLOG.md          # daily engineering log
 ├── scripts/
 │   ├── vllm_smoke.py      # does vLLM (CPU) run on this machine?
