@@ -1157,3 +1157,35 @@ All Day 22 leads are closed.
   bugs were already reported; an earlier draft only said so halfway
   through, which read as a bigger claim than the evidence supports. The
   "Try it" commands were run before publishing.
+
+## Day 26 — 2026-11-17
+
+**Phantom is on PyPI: `pip install phantom-kv`.**
+
+- Packaging (Pull Request #14, **v0.6.1**): keywords, classifiers, project
+  links, SPDX license; README links made absolute so they work on the PyPI
+  page. Built and checked with `twine check`, then installed into a fresh
+  environment and run from outside the repo before publishing.
+- **Trusted Publishing:** `.github/workflows/publish.yml` publishes when a
+  GitHub release is created, after checking the version matches the tag,
+  running the tests and `twine check`. PyPI trusts this one workflow in this
+  one repository, so no API token exists anywhere. PyPI also generated
+  signed attestations that the files were built from this repository.
+- **Verified from PyPI:** a fresh environment installed `phantom-kv==0.6.1`
+  and reproduced the README exactly (545/1,000 failing seeds with
+  `abort-free-race`, the same first failure, 53 → 6 events when shrunk), on
+  Python 3.12 and on Python 3.14, which CI does not cover.
+- **Found:** PyPI does not render Mermaid, so the README's diagrams show as
+  code on the PyPI page. To fix in the final release with a short
+  PyPI-specific description.
+
+## Day 27 — 2026-11-18
+
+**Paper: [docs/paper/phantom.pdf](paper/phantom.pdf)** (5 pages; LaTeX
+source alongside). The method (provenance oracle, deterministic execution,
+shrinking, running inside unmodified engines), the evaluation with planted
+and unplanted results kept separate, the two LMCache case studies, lessons,
+limitations and related work. Every number is taken from this devlog and the
+README; every reference was checked to exist (LMCache's paper is
+arXiv:2510.09665, FoundationDB's is SIGMOD 2021). The limitations section
+states what was not covered: GPU-only paths, SGLang, numerics.

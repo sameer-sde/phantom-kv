@@ -15,3 +15,10 @@ pd_faults.jsonl
 pd_fuzz_storage/
 pd_fuzz_events.jsonl
 phantom_pd_report.jsonl*
+
+# LaTeX build files
+docs/paper/*.aux
+docs/paper/*.log
+docs/paper/*.out
+docs/paper/*.fls
+docs/paper/*.fdb_latexmk

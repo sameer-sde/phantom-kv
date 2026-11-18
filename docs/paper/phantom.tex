@@ -1,0 +1,338 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\setlist{nosep,leftmargin=1.4em}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\title{\textbf{Phantom}\\[4pt]\Large Exact, Deterministic Testing of LLM-Serving KV Caches\\without GPUs or Model Weights}
+\author{Sameer Ahmed\\\small\url{https://github.com/sameer-sde/phantom-kv}}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+LLM-serving engines share KV-cache memory between requests through paged
+blocks, prefix caching, preemption, offloading to CPU memory or a separate
+cache server, and prefill/decode disaggregation. Bugs in this bookkeeping
+rarely crash: a request silently reads another request's KV, or the cache
+silently stops being reused. They are hard to test because a legitimate
+cache hit already perturbs floating-point outputs, because the dangerous
+interleavings are rare, and because GPUs are expensive. We present
+\textbf{Phantom}, a testing tool built on a weightless model that writes a
+\emph{provenance tag} (writer, position, prefix chain hash) into every KV
+slot instead of K/V vectors, and checks every slot it reads. Two slots are
+interchangeable exactly when their chain hashes match, which is the rule
+prefix caching is allowed to exploit, so the in-model check raises no false
+alarms on correct sharing. Combined with seeded, step-by-step execution and
+delta-debugging shrinking, Phantom runs inside real, unmodified vLLM on a
+laptop CPU. It caught every class of bug we planted (in vLLM's block pool,
+its connector API and LMCache's transfer code), found no bugs in vLLM's two
+CPU offloading systems, and independently found two real, open bugs in
+LMCache: a server restart shorter than one heartbeat is never noticed, and
+aborting a request whose cache lookup has finished but which has not been
+scheduled leaks read locks for 300\,s. Both were already reported upstream;
+Phantom shrank the second to a 7-event reproduction and provided A/B
+evidence that the proposed fixes work.
+\end{abstract}
+
+\section{Introduction}
+Modern LLM servers obtain their throughput by sharing KV-cache memory.
+PagedAttention~\cite{kwon2023vllm} splits the cache into fixed-size blocks;
+prefix caching lets requests with a common prefix share blocks; preemption
+evicts and later recomputes requests; offloading copies blocks to CPU memory
+or to an external cache server such as LMCache~\cite{liu2025lmcache}; and
+disaggregated serving~\cite{zhong2024distserve,patel2024splitwise} computes a
+prompt's KV on one engine and streams it to another. Each mechanism is
+bookkeeping about who owns which block, and each can fail silently.
+
+Testing this bookkeeping is difficult for three reasons. First, there is no
+clean oracle: a correct prefix-cache hit already changes floating-point
+results slightly, so ``the output changed'' does not imply a bug. Second, the
+dangerous cases, such as a client aborting while its KV is still being
+written, depend on interleavings that rarely reproduce. Third, fuzzing on
+GPUs is slow and costly.
+
+Phantom addresses all three:
+\begin{itemize}
+\item \textbf{An exact oracle.} A weightless model writes provenance tags
+instead of K/V vectors and verifies every slot it reads (\S\ref{sec:oracle}).
+\item \textbf{Deterministic execution.} One seed fixes the workload, the
+timing of aborts and transfers, and the injected faults; runs replay
+exactly and failures shrink with ddmin~\cite{zeller2002ddmin}
+(\S\ref{sec:dst}).
+\item \textbf{Real engines, no GPU.} Phantom plugs into vLLM's CPU backend
+as an out-of-tree model and drives the real engine one step at a time;
+vLLM's and LMCache's source code is not modified (\S\ref{sec:real}).
+\item \textbf{Evidence of coverage.} Every run reports the engine's own
+counters (prefix hits, preemptions, transfers, offloaded blocks), so a clean
+result is backed by proof that the stressed path ran.
+\end{itemize}
+We evaluate Phantom against planted bugs and against code in which nobody
+planted anything (\S\ref{sec:eval}), and describe two real LMCache bugs it
+found (\S\ref{sec:cases}).
+
+\section{Background}
+In vLLM~\cite{kwon2023vllm}, a scheduler decides each step which requests run
+and how many tokens each computes; a KV-cache manager assigns blocks from a
+pool with reference counts and an LRU list of evictable cached blocks; a
+prefix cache maps the hash of each full block's prefix to a block. A
+\emph{KV connector} API lets external code load KV into a request's blocks
+before it runs and save KV after it runs; it is how vLLM performs
+disaggregated serving and offloading. vLLM ships two CPU offloading systems,
+\code{SimpleCPUOffloadConnector} and the pluggable \code{OffloadingConnector}.
+LMCache~\cite{liu2025lmcache} is a separate KV cache layer; in its
+multi-process mode a cache server holds KV chunks (32 tokens here), and the
+vLLM side looks chunks up asynchronously, read-locks hits until they are
+loaded, and stores new chunks after compute.
+
+\section{The provenance oracle}\label{sec:oracle}
+Every request has a chain hash per position,
+$\mathit{chain}[p] = H(\mathit{chain}[p-1], \mathit{token}[p])$, a 64-bit
+BLAKE2b digest, so $\mathit{chain}[p]$ identifies the prefix
+$\mathit{tokens}[0..p]$. The Phantom model writes
+$\mathrm{Tag}(\mathit{writer}, p, \mathit{chain}[p])$ into the slot the
+engine assigns to position $p$. When the model reads its context back
+through the engine's block table, each slot is classified:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Slot holds & Verdict \\
+\midrule
+same chain hash, any writer & correct (legal prefix sharing) \\
+nothing & \code{unwritten-read} \\
+a tag for a different position or chain & \code{misplaced-block} / \code{chain-break} \\
+different chain hash, another request & \code{cross-request-leak} \\
+\bottomrule
+\end{tabular}
+\end{center}
+Two slots are interchangeable exactly when their chain hashes match, which
+is precisely the condition under which prefix caching may share them. A
+correct engine therefore never triggers a violation, up to a 64-bit hash
+collision. The next token is a hash of everything read, so a bad read also
+changes the visible output.
+
+A second oracle compares every output, including partial outputs of aborted
+requests, with a reference computed from the true prompt. The two are
+complementary: a transfer that delivers \emph{another prompt's} complete KV
+forms a valid chain for the wrong prefix and passes the in-model check, but
+fails the output check; an empty slot fails the in-model check on its first
+read. Phantom tests bookkeeping, not numerics: it cannot detect a wrong
+attention kernel.
+
+\section{Deterministic simulation and shrinking}\label{sec:dst}
+Following deterministic simulation testing in distributed
+systems~\cite{zhou2021fdb}, one seed is expanded into an explicit event
+list: arrivals with prompt lengths and shared prefixes, client aborts at
+chosen steps, and (for disaggregation) transfer delays. Delays are derived
+from a hash of (seed, request, block), so removing events does not perturb
+the timing of the rest. Because a run is a function of its event list,
+failures replay exactly and can be minimized with ddmin~\cite{zeller2002ddmin}:
+candidate event lists are re-run until no single event can be removed.
+Phantom first ran against a small simulated engine that we wrote to
+validate the oracle before trusting it on real code.
+
+\section{Inside real engines}\label{sec:real}
+\textbf{vLLM.} Phantom is registered through vLLM's plugin entry point as a
+model architecture for the CPU backend (vLLM 0.33 development build). Two
+details mattered. vLLM normally runs its engine core in a separate,
+busy-looping process, so an abort scheduled for step 40 can land a step
+late; Phantom runs the engine in-process and calls \code{step()} itself,
+stepping while the scheduler reports pending work, as vLLM's own loop does.
+And because vLLM caches blocks at schedule time, the model writes the whole
+batch before checking, like real attention; an early version that did not
+produced Phantom's only false alarm, which we traced and fixed.
+
+\textbf{Faults and plants.} Planted bugs are installed at runtime by
+wrapping engine functions, never by editing source: a stale prefix-cache
+index entry (\code{BlockPool}), a refcount error, early block freeing on
+abort during an asynchronous transfer, and transfer faults (another
+request's KV, a load reported done but never written, a stale duplicate
+copy landing later) in a connector loaded via vLLM's
+\code{kv\_connector\_module\_path}.
+
+\textbf{Offloading.} The CPU backend has no CUDA copy streams, so for both
+offloading systems only the copy engine is replaced, with tensor copies
+that follow the same instructions on separate load and store queues with
+seeded delays; for \code{OffloadingConnector} this uses vLLM's own pluggable
+\code{OffloadingSpec}. The scheduling and placement logic under test is
+vLLM's.
+
+\textbf{LMCache.} A CPU-only \code{lmcache server} (engine-driven transfers,
+32-token chunks) runs beside the engine, with vLLM's own prefix cache off so
+every reuse must come from LMCache. The harness waits for pending
+asynchronous lookups before each step, clears the server between runs, can
+restart it with a chosen downtime, and reads object and lock counts from its
+\code{/status} endpoint.
+
+\section{Evaluation}\label{sec:eval}
+All runs used one Apple-silicon laptop CPU. CI re-runs the vLLM checks on
+every pull request.
+
+\textbf{Oracle validation (simulator, 1,000 seeds, 40 requests each, 25\%
+aborts).} A correct engine produced 0 failing seeds; a planted
+abort-during-transfer free produced 545; a planted stale prefix-cache entry
+produced 1,000. Throughput was about 100 seeds per second on one core, and
+failing runs shrank from about 50 events to a median of 6 (max 13).
+
+\textbf{Planted bugs in real vLLM.} Table~\ref{tab:vllm} summarizes. A
+planted refcount bug never reached Phantom: vLLM's assertion
+\code{ref\_cnt == 0} fired first. Bugs that make the bookkeeping
+\emph{inconsistent} trip assertions; bugs that leave it \emph{consistent but
+wrong}, like a stale index entry, trip nothing, and that is where Phantom is
+needed.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lll}
+\toprule
+Setting & Unmodified vLLM & Planted bug \\
+\midrule
+Single engine, 20 seeds $\times$ 4 profiles & 0 violations, replay-identical & stale prefix cache caught on 15--20/20 \\
+Shrinking (stale prefix cache) & --- & 38 events $\to$ 13 (235 vLLM runs) \\
+Two engines, 200 seeds & 0/200, replay-identical & abort-free race 115/200 \\
+ & & swap 199/200, silent drop 199/200 \\
+ & & duplicate late copy 184/200 \\
+Shrinking (abort-free race) & --- & 24 events $\to$ 2 \\
+\bottomrule
+\end{tabular}
+\caption{Planted bugs in real vLLM. The profiles are baseline, chunked
+prefill, preemption and 64-token blocks; the two-engine campaign exercised
+1,371 asynchronous loads and 995 aborts, 335 of them while KV was in
+flight. The one seed that swap and silent drop missed transferred no tokens
+that were later read.}
+\label{tab:vllm}
+\end{table}
+
+\textbf{Unplanted code: vLLM offloading.} For \code{OffloadingConnector}, a
+50-seed campaign over eight configurations (including chunked offload,
+revisits, preemption, slow stores and synchronous loads) stored 21,181
+blocks and loaded 2,243 back, all verified, with every seed
+replay-identical. A planted ``store reported early'' fault was caught on
+24/50 seeds, and injected storage failures (117 failed loads, 757 failed
+stores) were recovered correctly. \code{SimpleCPUOffloadConnector} was clean
+over seven profiles. We found no bug in either system; because planted
+faults were caught under the same conditions, we read this as a real
+negative result for these configurations.
+
+\textbf{LMCache.} With vLLM's prefix cache off, 11,040 tokens were served
+from LMCache across 10 seeds, all verified, and a planted rotation of
+destination blocks inside LMCache's scatter routine was caught on 10/10
+seeds (1,149 misplaced blocks, 99 wrong outputs). Two further findings are
+described next.
+
+\section{Two real LMCache bugs}\label{sec:cases}
+\subsection{A fast server restart is never noticed}
+With the server restarted between workload runs, stores per server lifetime
+were 19, 20, 21, 6 for a 25\,s outage but 19, 0, 0, 0 when the server
+returned within a second: vLLM never re-registered, and caching stayed off
+while outputs stayed correct. The worker re-registers only after a heartbeat
+ping \emph{fails}, and the server answered pings positively even for a
+worker it no longer knew, so a restart shorter than the 10\,s heartbeat
+interval is invisible. The bug was already reported (LMCache issue \#4642)
+with an open fix (PR \#6106) that makes the ping report registration. With a
+fast restart followed by a full heartbeat, stores per lifetime went from 19,
+0, 0, 0 without the fix to 19, 20, 21, 19 with it. On the fix's older base
+commit the same restart \emph{hung} vLLM instead: the server rejected a
+store from the forgotten worker but, in that version, sent no reply. Every
+trial therefore ran with a time limit; a hang is a result.
+
+\subsection{Read locks leaked by aborted requests}
+Phantom's determinism check runs each seed twice and expects identical runs.
+With LMCache, three of ten seeds differed on replay, although no output was
+wrong. LMCache's \code{/status} showed objects still read-locked after every
+request had finished, 1--5 per seed; a normal clear skips locked objects, so
+they survived into the replay. With client aborts disabled, no locks
+remained and every seed replayed identically. A single aborted request,
+aborted at any state, never leaked, so we reused the ddmin shrinker with a
+new failure predicate, ``this run left read locks'', and a forced clear
+between candidates. It reduced a 41-event seed to 7 events in 171 runs,
+leaking 3 locks on 5 of 5 re-runs. Logging the connector at the abort showed
+the mechanism: the request was still waiting, its lookup had returned 96
+tokens and read-locked 3 chunks, and the scheduler had not yet consumed the
+result. The abort path dropped the lookup on the vLLM side without asking the
+server to release the locks, which then expire only with the 300\,s read
+TTL. This was reported as issue \#5656 with an open fix (PR \#6540). On the
+fix's base commit the two minimal cases leaked 2 and 3 locks and 3 seeds
+differed on replay; with the fix both were 0.
+
+We posted both A/B results on the fix PRs rather than filing duplicates.
+
+\section{Lessons}
+\begin{itemize}
+\item \textbf{Determinism is an oracle.} The lock leak never corrupted a
+token; it surfaced only because a replay was not identical.
+\item \textbf{A shrinker with a custom predicate is a debugger.} The 7-event
+case was found, not guessed.
+\item \textbf{Measure that the path ran.} A clean run with no prefix hits,
+transfers or offloads tests nothing; counters made clean results meaningful
+and exposed two harness mistakes of our own.
+\item \textbf{Search before filing.} Both LMCache bugs were known; the useful
+contribution was independent evidence about the proposed fixes.
+\end{itemize}
+
+\section{Limitations}
+Everything ran on vLLM's CPU backend and a CPU-only LMCache server, so
+GPU-only paths (CUDA copy streams, NIXL/RDMA transfers) are not covered, and
+offloading was tested with a replacement copy engine. SGLang~\cite{zheng2024sglang}
+and other engines are not covered yet. Phantom checks where KV goes, not
+how it is computed. Workloads are small (tens of requests per seed) and
+models tiny, which favors reaching edge cases quickly but may miss bugs that
+need scale.
+
+\section{Related work}
+Deterministic simulation testing was popularized by
+FoundationDB~\cite{zhou2021fdb} and is used by systems such as TigerBeetle;
+Jepsen~\cite{jepsen} tests distributed databases with fault injection and
+consistency checking. Property-based testing~\cite{claessen2000quickcheck}
+and delta debugging~\cite{zeller2002ddmin} supply random generation and
+shrinking. Phantom applies these ideas to LLM-serving KV caches, where its
+contribution is an exact oracle obtained by replacing the model.
+PagedAttention~\cite{kwon2023vllm}, SGLang~\cite{zheng2024sglang},
+LMCache~\cite{liu2025lmcache} and disaggregated
+serving~\cite{zhong2024distserve,patel2024splitwise} are the systems whose
+memory sharing Phantom tests.
+
+\section{Conclusion}
+Replacing the model with one that writes provenance tags turns KV-cache
+bookkeeping into something that can be checked exactly, on a laptop, inside
+real engines. Phantom caught every planted bug class, gave a validated
+negative result for vLLM's offloading, and independently found two real
+LMCache bugs, one shrunk to seven events. Phantom is open source (MIT) and
+installable with \code{pip install phantom-kv}; the repository contains the
+harness, the minimal reproductions and a day-by-day development log.
+
+\paragraph{Acknowledgments.} I used an AI coding assistant for code and log
+analysis; I ran every experiment and checked every result.
+
+\begin{thebibliography}{10}\small
+\bibitem{kwon2023vllm} W.~Kwon, Z.~Li, S.~Zhuang, Y.~Sheng, L.~Zheng, C.~H.~Yu,
+J.~E.~Gonzalez, H.~Zhang, I.~Stoica. Efficient Memory Management for Large
+Language Model Serving with PagedAttention. \emph{SOSP}, 2023.
+\bibitem{liu2025lmcache} Y.~Liu, J.~Yao, Y.~Cheng, Y.~An, X.~Chen, S.~Feng,
+Y.~Huang, S.~Shen, R.~Zhang, K.~Du, J.~Jiang. LMCache: An Efficient KV Cache
+Layer for Enterprise-Scale LLM Inference. arXiv:2510.09665, 2025.
+\bibitem{zhou2021fdb} J.~Zhou, M.~Xu, A.~Shraer, B.~Namasivayam, A.~Miller,
+E.~Tschannen, S.~Atherton, A.~J.~Beamon, et al. FoundationDB: A Distributed
+Unbundled Transactional Key Value Store. \emph{SIGMOD}, 2021.
+\bibitem{zeller2002ddmin} A.~Zeller, R.~Hildebrandt. Simplifying and Isolating
+Failure-Inducing Input. \emph{IEEE Transactions on Software Engineering},
+28(2), 2002.
+\bibitem{claessen2000quickcheck} K.~Claessen, J.~Hughes. QuickCheck: A
+Lightweight Tool for Random Testing of Haskell Programs. \emph{ICFP}, 2000.
+\bibitem{jepsen} K.~Kingsbury. Jepsen. \url{https://jepsen.io}.
+\bibitem{zheng2024sglang} L.~Zheng et al. SGLang: Efficient Execution of
+Structured Language Model Programs. \emph{NeurIPS}, 2024.
+\bibitem{zhong2024distserve} Y.~Zhong et al. DistServe: Disaggregating
+Prefill and Decoding for Goodput-optimized Large Language Model Serving.
+\emph{OSDI}, 2024.
+\bibitem{patel2024splitwise} P.~Patel et al. Splitwise: Efficient Generative
+LLM Inference Using Phase Splitting. \emph{ISCA}, 2024.
+\end{thebibliography}
+\end{document}
